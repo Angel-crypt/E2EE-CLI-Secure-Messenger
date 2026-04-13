@@ -43,7 +43,8 @@ El servidor **no tiene acceso al contenido de los mensajes**.
 * registro de usuarios activos
 * validación de username único
 * routing de mensajes
-* distribución de eventos (connect/disconnect)
+* gestión de presencia consultable por comandos CLI (`/users`)
+* notificación de cambios mediante mensajes `ERROR`/estado local (sin tipo `USER_EVENT` dedicado)
 
 ---
 
@@ -81,7 +82,7 @@ El servidor **no tiene acceso al contenido de los mensajes**.
 Cliente → genera llaves
 Cliente → register(username, pubkey)
 Servidor → valida / responde
-Servidor → distribuye usuarios activos
+Cliente → consulta usuarios activos con /users cuando lo requiera
 ```
 
 ---
@@ -111,7 +112,7 @@ else:
 ``` bash
 Intento de mensaje
 → no hay shared_key
-→ solicitar pubkey
+→ enviar HANDSHAKE_INIT
 → derivar clave
 → continuar
 ```
@@ -186,23 +187,77 @@ Mensaje inválido
 ### Tipos de mensajes
 
 * REGISTER
-* USER_EVENT
-* PUBLIC_KEY
+* HANDSHAKE_INIT
 * MESSAGE (encrypted)
 * ERROR
 
 ---
 
-### Estructura básica
+### Estructura base (obligatoriedad por tipo)
 
 ``` json
 {
+  message_id,
+  timestamp,
   type,
   from,
   to,
   payload
 }
 ```
+
+Regla: la obligatoriedad de `to` es por tipo, no global. El objeto anterior representa el universo de campos posibles, no un conjunto obligatorio universal.
+
+* `REGISTER` -> `to` no requerido
+* `HANDSHAKE_INIT` -> `to` requerido
+* `MESSAGE` -> `to` requerido
+* `ERROR` -> `to` opcional
+
+Matriz de obligatoriedad:
+
+| Campo | REGISTER | HANDSHAKE_INIT | MESSAGE | ERROR |
+|---|---|---|---|---|
+| `message_id` | requerido | requerido | requerido | requerido |
+| `timestamp` | requerido | requerido | requerido | requerido |
+| `type` | requerido | requerido | requerido | requerido |
+| `from` | requerido | requerido | requerido | requerido |
+| `to` | no requerido | requerido | requerido | opcional |
+| `payload` | requerido | requerido | requerido | requerido |
+
+---
+
+### Payload estricto y sin campos extra
+
+* El `payload` se valida de forma estricta por `type`.
+* No se aceptan campos extra en raíz ni dentro de `payload`.
+* Todo mensaje inválido se rechaza antes de cualquier procesamiento.
+
+---
+
+### Errores estructurados
+
+Los errores se transportan como mensajes `ERROR` con `payload` estructurado:
+
+``` json
+{
+  "code": "404_USER_OFFLINE",
+  "message": "El usuario destino no está disponible",
+  "details": {},
+  "retriable": true
+}
+```
+
+Categorías usadas:
+
+* 4xx -> formato, validación y estado del cliente/protocolo
+* 5xx -> fallas operativas del servidor
+
+Regla de direccionamiento para `ERROR`:
+
+* con `to`: entrega unicast al usuario destino
+* sin `to`: error local/contextual, no broadcast
+
+Referencia normativa: `docs/SRS/SRS-03 — Protocolo de Comunicación.md`.
 
 ---
 
