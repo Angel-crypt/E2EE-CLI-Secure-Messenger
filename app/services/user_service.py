@@ -3,28 +3,40 @@
 Implementa reglas simples:
 - una sola sesion activa por username,
 - presencia basada en estado real de conexion,
-- invalidacion de canales seguros al desconectar/reconectar,
+- invalidacion de canales por reconexion/desconexion,
 - errores estructurados compatibles con el protocolo.
+
+La validacion de canal seguro se delega a `KeyExchangeService`.
 """
+
+from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
 from app.protocol import make_error
+from app.services.key_exchange_service import KeyExchangeService
 
 
 class SessionUserService:
-    """Gestiona sesiones activas, presencia y canales seguros.
+    """Gestiona sesiones activas y presencia de usuarios.
 
     Nota:
         Es un servicio en memoria (runtime actual), sin persistencia.
     """
 
-    def __init__(self) -> None:
-        """Inicializa almacenamiento en memoria de usuarios y canales."""
+    def __init__(self, key_exchange_service: KeyExchangeService | None = None) -> None:
+        """Inicializa almacenamiento runtime de usuarios y dependencia de canales.
+
+        Args:
+            key_exchange_service: Servicio de key exchange a utilizar.
+                Si no se provee, se crea uno por defecto (timeout 5s).
+        """
         self._users: dict[str, dict[str, Any]] = {}
-        self._secure_channels: set[frozenset[str]] = set()
+        self._key_exchange = key_exchange_service or KeyExchangeService(
+            timeout_seconds=5
+        )
 
     def register(self, username: str) -> tuple[bool, dict[str, Any] | None]:
         """Intenta registrar una sesion para un usuario.
@@ -52,6 +64,7 @@ class SessionUserService:
             )
 
         now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        now_seconds = int(datetime.utcnow().timestamp())
         self._users[username] = {
             "session_id": str(uuid4()),
             "username": username,
@@ -61,7 +74,7 @@ class SessionUserService:
             "state": "online",
         }
 
-        self._invalidate_channels_for_user(username)
+        self._key_exchange.invalidate_user_channels(username, now_seconds)
         return True, None
 
     def disconnect(self, username: str) -> None:
@@ -69,9 +82,6 @@ class SessionUserService:
 
         Args:
             username: Usuario a desconectar.
-
-        Returns:
-            None.
         """
         user = self._users.get(username)
         if not user or user["status"] != "ACTIVE":
@@ -82,13 +92,16 @@ class SessionUserService:
         user["disconnected_at"] = (
             datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
         )
-        self._invalidate_channels_for_user(username)
+
+        self._key_exchange.invalidate_user_channels(
+            username, int(datetime.utcnow().timestamp())
+        )
 
     def list_users(self) -> list[dict[str, str]]:
         """Lista usuarios conocidos con formato ``username + state``.
 
         Returns:
-            Lista ordenada alfabéticamente por ``username``.
+            Lista ordenada alfabeticamente por ``username``.
         """
         users = [
             {"username": data["username"], "state": data["state"]}
@@ -98,16 +111,15 @@ class SessionUserService:
         return users
 
     def mark_secure_channel(self, user_a: str, user_b: str) -> None:
-        """Marca un canal seguro activo entre dos usuarios.
+        """Marca un canal seguro activo delegando al servicio de key exchange.
 
         Args:
             user_a: Primer participante.
             user_b: Segundo participante.
-
-        Returns:
-            None.
         """
-        self._secure_channels.add(frozenset({user_a, user_b}))
+        self._key_exchange.complete_handshake(
+            user_a, user_b, int(datetime.utcnow().timestamp())
+        )
 
     def can_send_message(
         self, sender: str, target: str
@@ -117,7 +129,7 @@ class SessionUserService:
         Reglas verificadas:
         - sender registrado y activo,
         - target registrado y activo,
-        - canal seguro activo entre ambos.
+        - canal seguro ACTIVE (delegado a KeyExchangeService).
 
         Args:
             sender: Usuario emisor.
@@ -154,27 +166,6 @@ class SessionUserService:
                 ),
             )
 
-        pair = frozenset({sender, target})
-        if pair not in self._secure_channels:
-            return (
-                False,
-                make_error(
-                    code="403_SECURE_CHANNEL_REQUIRED",
-                    message="No se pudo completar la operación solicitada.",
-                    to=sender,
-                    details={"operation": "MESSAGE"},
-                    retriable=True,
-                ),
-            )
-
-        return True, None
-
-    def _invalidate_channels_for_user(self, username: str) -> None:
-        """Invalida todos los canales que incluyen al usuario.
-
-        Args:
-            username: Usuario cuyos canales deben cerrarse.
-        """
-        self._secure_channels = {
-            channel for channel in self._secure_channels if username not in channel
-        }
+        return self._key_exchange.can_send_message(
+            sender, target, int(datetime.utcnow().timestamp())
+        )
