@@ -1,0 +1,18 @@
+E2EE-CLI Secure Messenger
+Copyright (c) 2026 Ángel Creap (Angel-crypt)
+
+This product includes software developed by third parties.
+
+Dependencies include (but are not limited to):
+
+- cryptography (Apache License 2.0 / BSD License)
+- prompt_toolkit (BSD License)
+- websockets (BSD License)
+- pytest (MIT License)
+- pytest-asyncio (Apache License 2.0)
+- ruff (MIT License)
+
+Each dependency is subject to its own license terms.
+See respective projects for full license details.
+
+This project itself is licensed under the MIT License.
