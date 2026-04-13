@@ -6,6 +6,8 @@ Este modulo centraliza la validacion de mensajes. Provee:
 - construccion de mensajes ERROR estructurados.
 """
 
+from __future__ import annotations
+
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
