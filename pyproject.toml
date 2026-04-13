@@ -19,9 +19,6 @@ dev = [
     "ruff>=0.15.10",
 ]
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-
 [tool.ruff]
 line-length = 88
 
