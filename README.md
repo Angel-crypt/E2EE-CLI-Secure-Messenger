@@ -119,6 +119,8 @@ uv run python main.py
 uv run pytest
 ```
 
+Convención de pruebas (TDD real): [TESTING](./docs/TESTING.md)
+
 ---
 
 ## 🛠️ Desarrollo
