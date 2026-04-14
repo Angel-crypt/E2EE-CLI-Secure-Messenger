@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 import re
@@ -38,6 +38,8 @@ ERROR_CODES = {
     "503_ROUTING_UNAVAILABLE",
     "504_KEY_EXCHANGE_TIMEOUT",
 }
+
+TIMESTAMP_TOLERANCE_SECONDS = 120
 
 
 @dataclass
@@ -289,10 +291,19 @@ def _validate_timestamp(value: str) -> None:
     """Valida timestamp ISO-8601 (soporta sufijo ``Z``)."""
 
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    parsed = datetime.now(timezone.utc)
     try:
-        datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized)
     except Exception:
         _fail("400_INVALID_FIELD_TYPE", "timestamp debe cumplir formato ISO-8601")
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+
+    now = datetime.now(timezone.utc)
+    delta = abs((now - parsed.astimezone(timezone.utc)).total_seconds())
+    if delta > TIMESTAMP_TOLERANCE_SECONDS:
+        _fail("400_TIMESTAMP_OUT_OF_WINDOW", "timestamp fuera de ventana permitida")
 
 
 def _validate_username(value: Any, field: str, error_code: str) -> None:
