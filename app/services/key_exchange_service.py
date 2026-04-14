@@ -10,31 +10,11 @@ Implementa reglas operativas:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
+from app.interfaces import ClockPort, SystemClock
 from app.protocol import make_error
-
-
-@dataclass
-class _ChannelData:
-    """Representa el estado runtime de un canal seguro entre dos usuarios.
-
-    Atributos:
-        peer_a: Primer participante del canal.
-        peer_b: Segundo participante del canal.
-        state: Estado actual del canal.
-        started_at: Timestamp (segundos) del inicio del handshake.
-        established_at: Timestamp (segundos) de activacion del canal.
-        invalidated_at: Timestamp (segundos) de invalidacion del canal.
-    """
-
-    peer_a: str
-    peer_b: str
-    state: str
-    started_at: int | None = None
-    established_at: int | None = None
-    invalidated_at: int | None = None
+from app.repositories.in_memory_repositories import InMemoryChannelRepository
 
 
 class KeyExchangeService:
@@ -45,17 +25,25 @@ class KeyExchangeService:
         para permitir avanzar CLI y logica de aplicacion en esta fase.
     """
 
-    def __init__(self, timeout_seconds: int = 5) -> None:
+    def __init__(
+        self,
+        timeout_seconds: int = 5,
+        clock: ClockPort | None = None,
+        channel_repository: InMemoryChannelRepository | None = None,
+    ) -> None:
         """Inicializa almacenamiento runtime de canales.
 
         Args:
             timeout_seconds: Ventana maxima para handshake en estado ESTABLISHING.
+            clock: Puerto de reloj para validaciones temporales.
+            channel_repository: Repositorio en memoria de estado de canales.
         """
         self._timeout_seconds = timeout_seconds
-        self._channels: dict[frozenset[str], _ChannelData] = {}
+        self._clock = clock or SystemClock()
+        self._channel_repository = channel_repository or InMemoryChannelRepository()
 
     def start_handshake(
-        self, user_a: str, user_b: str, now_seconds: int
+        self, user_a: str, user_b: str, now_seconds: int | None = None
     ) -> tuple[bool, dict[str, Any] | None]:
         """Inicia handshake para un par si no existe canal ACTIVE.
 
@@ -69,24 +57,27 @@ class KeyExchangeService:
             - ``ok=True`` si el estado queda en ESTABLISHING o ya era ACTIVE.
             - ``error=None`` en ambos casos para mantener API simple.
         """
-        pair = self._pair(user_a, user_b)
-        channel = self._channels.get(pair)
+        current_seconds = self._resolve_now_seconds(now_seconds)
 
-        if channel and channel.state == "ACTIVE":
+        pair = self._pair_key(user_a, user_b)
+        channel = self._channel_repository.get_channel(pair)
+
+        if channel and channel["state"] == "ACTIVE":
             return True, None
 
-        self._channels[pair] = _ChannelData(
+        self._channel_repository.upsert_channel(
+            pair_key=pair,
             peer_a=user_a,
             peer_b=user_b,
             state="ESTABLISHING",
-            started_at=now_seconds,
+            started_at=current_seconds,
             established_at=None,
             invalidated_at=None,
         )
         return True, None
 
     def ensure_handshake_started(
-        self, user_a: str, user_b: str, now_seconds: int
+        self, user_a: str, user_b: str, now_seconds: int | None = None
     ) -> tuple[bool, dict[str, Any] | None]:
         """Garantiza estado ESTABLISHING cuando no hay canal ACTIVE.
 
@@ -108,7 +99,9 @@ class KeyExchangeService:
             return False, error
         return True, None
 
-    def complete_handshake(self, user_a: str, user_b: str, now_seconds: int) -> None:
+    def complete_handshake(
+        self, user_a: str, user_b: str, now_seconds: int | None = None
+    ) -> None:
         """Marca handshake como completado y activa el canal.
 
         Args:
@@ -116,18 +109,24 @@ class KeyExchangeService:
             user_b: Usuario participante B.
             now_seconds: Tiempo actual en segundos.
         """
-        pair = self._pair(user_a, user_b)
-        channel = self._channels.get(pair)
-        if not channel:
-            channel = _ChannelData(peer_a=user_a, peer_b=user_b, state="NONE")
-            self._channels[pair] = channel
+        current_seconds = self._resolve_now_seconds(now_seconds)
+        pair = self._pair_key(user_a, user_b)
+        existing = self._channel_repository.get_channel(pair)
+        peer_a = existing["peer_a"] if existing else user_a
+        peer_b = existing["peer_b"] if existing else user_b
 
-        channel.state = "ACTIVE"
-        channel.established_at = now_seconds
-        channel.invalidated_at = None
+        self._channel_repository.upsert_channel(
+            pair_key=pair,
+            peer_a=peer_a,
+            peer_b=peer_b,
+            state="ACTIVE",
+            started_at=existing["started_at"] if existing else None,
+            established_at=current_seconds,
+            invalidated_at=None,
+        )
 
     def can_send_message(
-        self, sender: str, target: str, now_seconds: int
+        self, sender: str, target: str, now_seconds: int | None = None
     ) -> tuple[bool, dict[str, Any] | None]:
         """Valida si existe canal ACTIVE para permitir MESSAGE.
 
@@ -156,7 +155,7 @@ class KeyExchangeService:
         return True, None
 
     def check_timeout(
-        self, user_a: str, user_b: str, now_seconds: int
+        self, user_a: str, user_b: str, now_seconds: int | None = None
     ) -> tuple[bool, dict[str, Any] | None]:
         """Evalua timeout de handshake para un par de usuarios.
 
@@ -170,38 +169,51 @@ class KeyExchangeService:
             - ``timed_out=True`` y `ERROR` 504 si expiro handshake.
             - ``timed_out=False`` y ``None`` si no aplica timeout.
         """
-        pair = self._pair(user_a, user_b)
-        channel = self._channels.get(pair)
-        if not channel or channel.state != "ESTABLISHING" or channel.started_at is None:
+        current_seconds = self._resolve_now_seconds(now_seconds)
+
+        pair = self._pair_key(user_a, user_b)
+        channel = self._channel_repository.get_channel(pair)
+        if (
+            not channel
+            or channel["state"] != "ESTABLISHING"
+            or channel["started_at"] is None
+        ):
             return False, None
 
-        if now_seconds - channel.started_at <= self._timeout_seconds:
+        if current_seconds - channel["started_at"] <= self._timeout_seconds:
             return False, None
 
-        channel.state = "INVALID"
-        channel.invalidated_at = now_seconds
+        self._channel_repository.upsert_channel(
+            pair_key=pair,
+            peer_a=channel["peer_a"],
+            peer_b=channel["peer_b"],
+            state="INVALID",
+            started_at=channel["started_at"],
+            established_at=channel["established_at"],
+            invalidated_at=current_seconds,
+        )
         return (
             True,
             make_error(
                 code="504_KEY_EXCHANGE_TIMEOUT",
                 message="No se pudo completar la operación solicitada.",
-                to=channel.peer_a,
+                to=channel["peer_a"],
                 details={"operation": "HANDSHAKE_INIT"},
                 retriable=True,
             ),
         )
 
-    def invalidate_user_channels(self, username: str, now_seconds: int) -> None:
+    def invalidate_user_channels(
+        self, username: str, now_seconds: int | None = None
+    ) -> None:
         """Invalida todos los canales donde participa el usuario.
 
         Args:
             username: Usuario cuyos canales deben invalidarse.
             now_seconds: Tiempo actual en segundos.
         """
-        for channel in self._channels.values():
-            if username in {channel.peer_a, channel.peer_b}:
-                channel.state = "INVALID"
-                channel.invalidated_at = now_seconds
+        current_seconds = self._resolve_now_seconds(now_seconds)
+        self._channel_repository.invalidate_user_channels(username, current_seconds)
 
     def channel_state(self, user_a: str, user_b: str) -> str:
         """Obtiene estado actual del canal para un par.
@@ -213,11 +225,17 @@ class KeyExchangeService:
         Returns:
             Estado del canal: ``NONE``, ``ESTABLISHING``, ``ACTIVE`` o ``INVALID``.
         """
-        channel = self._channels.get(self._pair(user_a, user_b))
+        channel = self._channel_repository.get_channel(self._pair_key(user_a, user_b))
         if not channel:
             return "NONE"
-        return channel.state
+        return str(channel["state"])
 
-    def _pair(self, user_a: str, user_b: str) -> frozenset[str]:
-        """Normaliza clave de canal para que sea independiente del orden."""
-        return frozenset({user_a, user_b})
+    def _pair_key(self, user_a: str, user_b: str) -> str:
+        """Normaliza clave de canal como string estable para persistencia."""
+        a, b = sorted([user_a, user_b])
+        return f"{a}|{b}"
+
+    def _resolve_now_seconds(self, now_seconds: int | None) -> int:
+        if now_seconds is not None:
+            return now_seconds
+        return self._clock.now_seconds()
