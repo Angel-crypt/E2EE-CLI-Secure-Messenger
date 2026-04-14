@@ -128,47 +128,12 @@ class ChatService:
             - ``ok=True`` si puede enviarse.
             - ``ok=False`` con `ERROR` estructurado si falla alguna regla.
         """
-        try:
-            validated = validate_message(message)
-        except ProtocolValidationError as exc:
-            return (
-                False,
-                make_error(
-                    code=exc.code,
-                    message="No se pudo completar la operación solicitada.",
-                    to=message.get("from"),
-                    details={"operation": "MESSAGE"},
-                    retriable=False,
-                ),
-            )
+        validated, error = self._validate_message_and_participants(message)
+        if error is not None or validated is None:
+            return False, error
 
         sender = validated["from"]
         target = validated["to"]
-
-        if not self._user_service.is_user_active(sender):
-            return (
-                False,
-                make_error(
-                    code="401_NOT_REGISTERED",
-                    message="No se pudo completar la operación solicitada.",
-                    to=sender,
-                    details={"operation": "MESSAGE"},
-                    retriable=False,
-                ),
-            )
-
-        if not self._user_service.is_user_active(target):
-            return (
-                False,
-                make_error(
-                    code="404_USER_OFFLINE",
-                    message="No se pudo completar la operación solicitada.",
-                    to=sender,
-                    details={"operation": "MESSAGE"},
-                    retriable=True,
-                ),
-            )
-
         return self._key_exchange.can_send_message(sender, target, now_seconds)
 
     def validate_outgoing_message_with_handshake(
@@ -186,49 +151,12 @@ class ChatService:
             - ``ok=False`` con error estructurado si no puede.
             - ``handshake_started=True`` si se inicio handshake automatico.
         """
-        try:
-            validated = validate_message(message)
-        except ProtocolValidationError as exc:
-            return (
-                False,
-                make_error(
-                    code=exc.code,
-                    message="No se pudo completar la operación solicitada.",
-                    to=message.get("from"),
-                    details={"operation": "MESSAGE"},
-                    retriable=False,
-                ),
-                False,
-            )
+        validated, error = self._validate_message_and_participants(message)
+        if error is not None or validated is None:
+            return False, error, False
 
         sender = validated["from"]
         target = validated["to"]
-
-        if not self._user_service.is_user_active(sender):
-            return (
-                False,
-                make_error(
-                    code="401_NOT_REGISTERED",
-                    message="No se pudo completar la operación solicitada.",
-                    to=sender,
-                    details={"operation": "MESSAGE"},
-                    retriable=False,
-                ),
-                False,
-            )
-
-        if not self._user_service.is_user_active(target):
-            return (
-                False,
-                make_error(
-                    code="404_USER_OFFLINE",
-                    message="No se pudo completar la operación solicitada.",
-                    to=sender,
-                    details={"operation": "MESSAGE"},
-                    retriable=True,
-                ),
-                False,
-            )
 
         if self._key_exchange.channel_state(sender, target) != "ACTIVE":
             started, start_error = self._key_exchange.ensure_handshake_started(
@@ -253,3 +181,59 @@ class ChatService:
             )
 
         return True, None, False
+
+    def _validate_message_and_participants(
+        self, message: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Valida estructura MESSAGE y estado de participantes.
+
+        Args:
+            message: Mensaje candidato de tipo MESSAGE.
+
+        Returns:
+            Tupla ``(validated, error)``:
+            - ``validated`` con mensaje normalizado si es valido.
+            - ``error`` estructurado si falla protocolo/sesion/presencia.
+        """
+        try:
+            validated = validate_message(message)
+        except ProtocolValidationError as exc:
+            return (
+                None,
+                make_error(
+                    code=exc.code,
+                    message="No se pudo completar la operación solicitada.",
+                    to=message.get("from"),
+                    details={"operation": "MESSAGE"},
+                    retriable=False,
+                ),
+            )
+
+        sender = validated["from"]
+        target = validated["to"]
+
+        if not self._user_service.is_user_active(sender):
+            return (
+                None,
+                make_error(
+                    code="401_NOT_REGISTERED",
+                    message="No se pudo completar la operación solicitada.",
+                    to=sender,
+                    details={"operation": "MESSAGE"},
+                    retriable=False,
+                ),
+            )
+
+        if not self._user_service.is_user_active(target):
+            return (
+                None,
+                make_error(
+                    code="404_USER_OFFLINE",
+                    message="No se pudo completar la operación solicitada.",
+                    to=sender,
+                    details={"operation": "MESSAGE"},
+                    retriable=True,
+                ),
+            )
+
+        return validated, None
