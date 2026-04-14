@@ -105,11 +105,17 @@ Esto habilita:
 
 ---
 
-## ▶️ Ejecutar
+## ▶️ Ejecutar CLI
 
 ```bash
 uv run python main.py
 ```
+
+Notas de esta fase:
+
+* CLI interactivo local (sin websocket todavía)
+* estado en memoria por ejecución
+* notificaciones push dirigidas vía buzón local (`/notif` + polling)
 
 ---
 
@@ -145,9 +151,23 @@ Incluye:
 /users
 /chat <user>
 /msg <user> <msg>
+/notif
+/poll on|off
+/theme <default|minimal|contrast|matrix>
+/status
+/clear
+/leave
 /exit
 /help
 ```
+
+Flujo rápido recomendado:
+
+1. `/user alice`
+2. `/users`
+3. `/chat bob`
+4. escribir texto libre (modo chat persistente)
+5. `/notif` (ver notificaciones pendientes)
 
 ---
 
