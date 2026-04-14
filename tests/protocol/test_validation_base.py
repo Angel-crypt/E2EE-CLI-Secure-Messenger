@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timezone
 
 import pytest
 
@@ -6,9 +7,15 @@ from app.protocol import ProtocolValidationError, validate_message
 
 
 def _base_message(message_type: str) -> dict:
+    now_iso = (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     msg = {
         "message_id": "f8215ae4-a9d5-4434-ae54-3cc676db7ce0",
-        "timestamp": "2026-04-13T15:08:11Z",
+        "timestamp": now_iso,
         "type": message_type,
         "from": "alice",
         "payload": {},
