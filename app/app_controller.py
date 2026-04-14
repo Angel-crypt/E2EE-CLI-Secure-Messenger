@@ -10,16 +10,22 @@ No contiene logica pesada de chat; esa vive en `ChatService`.
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
+from app.interfaces import (
+    AppControllerPort,
+    ClockPort,
+    InMemoryNotificationBus,
+    NotificationPort,
+    SystemClock,
+)
 from app.protocol import ProtocolValidationError, make_error, validate_message
 from app.services.chat_service import ChatService
 from app.services.key_exchange_service import KeyExchangeService
 from app.services.user_service import SessionUserService
 
 
-class AppController:
+class AppController(AppControllerPort):
     """Orquesta flujos de registro, key exchange y envio de mensaje."""
 
     def __init__(
@@ -27,6 +33,8 @@ class AppController:
         user_service: SessionUserService | None = None,
         key_exchange_service: KeyExchangeService | None = None,
         chat_service: ChatService | None = None,
+        clock: ClockPort | None = None,
+        notifications: NotificationPort | None = None,
     ) -> None:
         """Inicializa servicios del dominio.
 
@@ -34,18 +42,24 @@ class AppController:
             user_service: Servicio de sesion/presencia.
             key_exchange_service: Servicio de estado de canal.
             chat_service: Servicio de validacion/estructura de chat.
+            clock: Puerto de reloj para tiempos de dominio.
+            notifications: Puerto de notificaciones dirigidas.
         """
+        self._clock = clock or SystemClock()
+        self._notifications_bus = notifications or InMemoryNotificationBus()
+
         self._key_exchange = key_exchange_service or KeyExchangeService(
-            timeout_seconds=5
+            timeout_seconds=5,
+            clock=self._clock,
         )
         self._user_service = user_service or SessionUserService(
-            key_exchange_service=self._key_exchange
+            key_exchange_service=self._key_exchange,
+            clock=self._clock,
         )
         self._chat_service = chat_service or ChatService(
             user_service=self._user_service,
             key_exchange_service=self._key_exchange,
         )
-        self._notifications: dict[str, list[dict[str, Any]]] = {}
 
     def register(self, raw_message: dict[str, Any]) -> dict[str, Any]:
         """Procesa registro de usuario desde mensaje REGISTER."""
@@ -61,9 +75,11 @@ class AppController:
         return self._ok({"event": "REGISTERED", "username": message["from"]})
 
     def handshake_init(
-        self, raw_message: dict[str, Any], now_seconds: int
+        self, raw_message: dict[str, Any], now_seconds: int | None = None
     ) -> dict[str, Any]:
         """Procesa inicio de key exchange desde HANDSHAKE_INIT."""
+        current_seconds = self._resolve_now_seconds(now_seconds)
+
         valid, error_or_message = self._validate_or_error(raw_message)
         if not valid:
             return self._fail(error_or_message)
@@ -91,7 +107,7 @@ class AppController:
             )
 
         ok, error = self._key_exchange.start_handshake(
-            message["from"], message["to"], now_seconds
+            message["from"], message["to"], current_seconds
         )
         if not ok:
             return self._fail(error or self._internal_error("HANDSHAKE_INIT"))
@@ -108,12 +124,14 @@ class AppController:
         )
 
     def send_message(
-        self, raw_message: dict[str, Any], now_seconds: int
+        self, raw_message: dict[str, Any], now_seconds: int | None = None
     ) -> dict[str, Any]:
         """Procesa envio de MESSAGE delegando reglas al ChatService."""
+        current_seconds = self._resolve_now_seconds(now_seconds)
+
         ok, error, handshake_started = (
             self._chat_service.validate_outgoing_message_with_handshake(
-                raw_message, now_seconds
+                raw_message, current_seconds
             )
         )
         if not ok:
@@ -142,9 +160,15 @@ class AppController:
         )
 
     def send_text_message(
-        self, sender: str, target: str, text: str, now_seconds: int
+        self,
+        sender: str,
+        target: str,
+        text: str,
+        now_seconds: int | None = None,
     ) -> dict[str, Any]:
         """Construye y valida mensaje de texto de conversacion (flujo CLI/app)."""
+        current_seconds = self._resolve_now_seconds(now_seconds)
+
         ok_build, message, error = self._chat_service.build_message_from_text(
             sender, target, text
         )
@@ -154,7 +178,7 @@ class AppController:
         if message is None:
             return self._fail(self._internal_error("MESSAGE"))
 
-        return self.send_message(message, now_seconds)
+        return self.send_message(message, current_seconds)
 
     def disconnect(self, username: str) -> dict[str, Any]:
         """Cierra sesion de usuario y actualiza presencia."""
@@ -167,15 +191,15 @@ class AppController:
 
     def pull_notifications(self, username: str) -> dict[str, Any]:
         """Retorna y limpia notificaciones push dirigidas para un usuario."""
-        items = self._notifications.get(username, [])
-        self._notifications[username] = []
+        items = self._notifications_bus.pull_for_user(username)
         return self._ok({"notifications": items})
 
     def complete_handshake(
-        self, user_a: str, user_b: str, now_seconds: int
+        self, user_a: str, user_b: str, now_seconds: int | None = None
     ) -> dict[str, Any]:
         """Marca handshake como completo para habilitar envio (fase mock)."""
-        self._key_exchange.complete_handshake(user_a, user_b, now_seconds)
+        current_seconds = self._resolve_now_seconds(now_seconds)
+        self._key_exchange.complete_handshake(user_a, user_b, current_seconds)
         return self._ok(
             {
                 "event": "HANDSHAKE_COMPLETED",
@@ -186,10 +210,13 @@ class AppController:
         )
 
     def check_handshake_timeout(
-        self, user_a: str, user_b: str, now_seconds: int
+        self, user_a: str, user_b: str, now_seconds: int | None = None
     ) -> dict[str, Any]:
         """Evalua timeout de handshake para un par."""
-        timed_out, error = self._key_exchange.check_timeout(user_a, user_b, now_seconds)
+        current_seconds = self._resolve_now_seconds(now_seconds)
+        timed_out, error = self._key_exchange.check_timeout(
+            user_a, user_b, current_seconds
+        )
         if timed_out:
             return self._fail(error or self._internal_error("HANDSHAKE_INIT"))
         return self._ok(
@@ -237,9 +264,9 @@ class AppController:
         target = error.get("to")
         if not isinstance(target, str):
             return
-        self._notifications.setdefault(target, []).append(error)
+        self._notifications_bus.publish_to_user(target, error)
 
-
-def now_seconds() -> int:
-    """Reloj utilitario para capa app (facil de reemplazar en adaptadores)."""
-    return int(datetime.utcnow().timestamp())
+    def _resolve_now_seconds(self, now_seconds: int | None) -> int:
+        if now_seconds is not None:
+            return now_seconds
+        return self._clock.now_seconds()
