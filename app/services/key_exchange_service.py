@@ -85,6 +85,29 @@ class KeyExchangeService:
         )
         return True, None
 
+    def ensure_handshake_started(
+        self, user_a: str, user_b: str, now_seconds: int
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Garantiza estado ESTABLISHING cuando no hay canal ACTIVE.
+
+        Args:
+            user_a: Usuario origen.
+            user_b: Usuario destino.
+            now_seconds: Tiempo actual en segundos.
+
+        Returns:
+            Tupla ``(started, error)``:
+            - ``started=True`` si se inicio un nuevo handshake.
+            - ``started=False`` si no fue necesario (ya ACTIVE).
+            - ``error`` en caso de fallo inesperado (actualmente ninguno).
+        """
+        if self.channel_state(user_a, user_b) == "ACTIVE":
+            return False, None
+        ok, error = self.start_handshake(user_a, user_b, now_seconds)
+        if not ok:
+            return False, error
+        return True, None
+
     def complete_handshake(self, user_a: str, user_b: str, now_seconds: int) -> None:
         """Marca handshake como completado y activa el canal.
 
