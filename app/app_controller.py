@@ -228,6 +228,16 @@ class AppController(AppControllerPort):
             }
         )
 
+    def get_channel_state(self, user_a: str, user_b: str) -> dict[str, Any]:
+        """Retorna estado actual del canal para un par de usuarios."""
+        return self._ok(
+            {
+                "from": user_a,
+                "to": user_b,
+                "state": self._key_exchange.channel_state(user_a, user_b),
+            }
+        )
+
     def _validate_or_error(
         self, raw_message: dict[str, Any]
     ) -> tuple[bool, dict[str, Any]]:
