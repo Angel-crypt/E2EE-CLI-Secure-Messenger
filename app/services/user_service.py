@@ -110,6 +110,18 @@ class SessionUserService:
         users.sort(key=lambda item: item["username"])
         return users
 
+    def is_user_active(self, username: str) -> bool:
+        """Indica si un usuario tiene sesion activa.
+
+        Args:
+            username: Usuario a consultar.
+
+        Returns:
+            ``True`` si existe sesion ``ACTIVE`` para el usuario.
+        """
+        user = self._users.get(username)
+        return bool(user and user["status"] == "ACTIVE")
+
     def mark_secure_channel(self, user_a: str, user_b: str) -> None:
         """Marca un canal seguro activo delegando al servicio de key exchange.
 
