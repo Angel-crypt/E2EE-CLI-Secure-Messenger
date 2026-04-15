@@ -75,6 +75,8 @@ def test_message_from_must_not_equal_to():
             "ciphertext": "gAAAAABo...",
             "encoding": "base64url",
             "algorithm": "FERNET",
+            "nonce": "YjRjNDY2ZjQwYw",
+            "sent_at": now_iso,
         },
     }
 

@@ -62,6 +62,8 @@ def _message_message() -> dict:
             "ciphertext": "gAAAAABo...",
             "encoding": "base64url",
             "algorithm": "FERNET",
+            "nonce": "YjRjNDY2ZjQwYw",
+            "sent_at": now_iso,
         },
     }
 

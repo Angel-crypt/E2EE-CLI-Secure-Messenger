@@ -39,6 +39,8 @@ def _base_message(message_type: str) -> dict:
             "ciphertext": "gAAAAABo...",
             "encoding": "base64url",
             "algorithm": "FERNET",
+            "nonce": "YjRjNDY2ZjQwYw",
+            "sent_at": now_iso,
         }
     elif message_type == "ERROR":
         msg["from"] = "server"
