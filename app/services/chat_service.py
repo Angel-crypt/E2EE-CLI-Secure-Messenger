@@ -94,6 +94,8 @@ class ChatService:
                 "ciphertext": text_normalized,
                 "encoding": "base64url",
                 "algorithm": "FERNET",
+                "nonce": uuid4().hex,
+                "sent_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
             },
         }
 
