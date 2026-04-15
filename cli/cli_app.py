@@ -16,6 +16,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from app.app_controller import AppController
+from cli.command_catalog import COMMANDS, resolve_command
 from cli.formatters import (
     build_users_table,
     format_error,
@@ -26,23 +27,7 @@ from cli.formatters import (
     format_warning,
 )
 from cli.themes import get_theme, list_theme_names
-
-
-COMMANDS: tuple[str, ...] = (
-    "/user",
-    "/logout",
-    "/users",
-    "/chat",
-    "/msg",
-    "/notif",
-    "/poll",
-    "/theme",
-    "/leave",
-    "/help",
-    "/status",
-    "/clear",
-    "/exit",
-)
+from cli.status_diagnostics import build_status_diagnostics
 
 
 PROMPT_TOOLKIT_COLOR_MAP: dict[str, str] = {
@@ -637,44 +622,18 @@ class CliApp:
         return sorted(known)
 
     def _status_diagnostics(self) -> dict[str, str]:
-        response = self._controller.list_users()
-        users = response.get("data", {}).get("users", []) if response.get("ok") else []
-        runtime_users = len(users)
-        online_users = sum(1 for user in users if user.get("state") == "online")
-
-        target = self._chat_target or "(sin chat activo)"
-        if self._chat_target is None:
-            target_status = "N/A"
-            channel = "N/A"
-        else:
-            target_status = self._user_status(self._chat_target)
-            if self._current_user is None:
-                channel = "N/A"
-            else:
-                channel = self._channel_state(self._current_user, self._chat_target)
-
-        return {
-            "session": "registrado" if self._current_user else "sin registrar",
-            "runtime_users": str(runtime_users),
-            "online_users": str(online_users),
-            "chat_active": "sí" if self._chat_target else "no",
-            "target": target,
-            "target_status": target_status,
-            "channel": channel,
-            "theme": self._theme_name,
-            "polling": "on" if self._poll_enabled else "off",
-        }
+        return build_status_diagnostics(
+            list_users=self._controller.list_users,
+            current_user=self._current_user,
+            chat_target=self._chat_target,
+            user_status=self._user_status,
+            channel_state=self._channel_state,
+            theme_name=self._theme_name,
+            poll_enabled=self._poll_enabled,
+        )
 
     def _resolve_command(self, raw_command: str) -> str | None:
-        if not raw_command.startswith("/"):
-            return None
-        commands = list(COMMANDS)
-        if raw_command in commands:
-            return raw_command
-        matches = [command for command in commands if command.startswith(raw_command)]
-        if not matches:
-            return None
-        return matches[0]
+        return resolve_command(raw_command, COMMANDS)
 
     def _build_prompt_toolkit_style(self) -> Style:
         return Style.from_dict(
