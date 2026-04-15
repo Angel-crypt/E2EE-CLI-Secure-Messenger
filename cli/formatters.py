@@ -24,6 +24,7 @@ ERROR_UX_MESSAGES = {
     "500_INTERNAL_ERROR": "Error interno temporal. Intenta nuevamente.",
     "503_ROUTING_UNAVAILABLE": "Servicio temporalmente no disponible.",
     "504_KEY_EXCHANGE_TIMEOUT": "Tiempo de intercambio de clave agotado. Reintenta.",
+    "409_REMOTE_KEY_CHANGED": "Advertencia: cambió la fingerprint remota; posible MITM.",
 }
 
 
