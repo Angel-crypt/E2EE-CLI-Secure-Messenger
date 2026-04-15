@@ -30,10 +30,12 @@ ERROR_CODES = {
     "400_INVALID_TO",
     "400_INVALID_PAYLOAD",
     "400_TIMESTAMP_OUT_OF_WINDOW",
+    "400_REPLAY_TIMESTAMP_INVALID",
     "401_NOT_REGISTERED",
     "403_SECURE_CHANNEL_REQUIRED",
     "404_USER_OFFLINE",
     "409_USERNAME_TAKEN",
+    "409_REPLAY_DETECTED",
     "500_INTERNAL_ERROR",
     "503_ROUTING_UNAVAILABLE",
     "504_KEY_EXCHANGE_TIMEOUT",
@@ -221,13 +223,17 @@ def _validate_message_type(msg: dict[str, Any]) -> None:
     payload = msg["payload"]
     _strict_payload(
         payload,
-        required={"ciphertext", "encoding", "algorithm"},
+        required={"ciphertext", "encoding", "algorithm", "nonce", "sent_at"},
         optional=set(),
     )
 
     _require_non_empty_str(payload, "ciphertext", "400_INVALID_PAYLOAD")
     _require_non_empty_str(payload, "encoding", "400_INVALID_PAYLOAD")
     _require_non_empty_str(payload, "algorithm", "400_INVALID_PAYLOAD")
+    _require_non_empty_str(payload, "nonce", "400_INVALID_PAYLOAD")
+    _require_non_empty_str(payload, "sent_at", "400_INVALID_PAYLOAD")
+
+    _validate_timestamp(payload["sent_at"])
 
     if payload["encoding"] not in {"base64", "base64url"}:
         _fail("400_INVALID_PAYLOAD", "Valor invalido en MESSAGE payload.encoding")
