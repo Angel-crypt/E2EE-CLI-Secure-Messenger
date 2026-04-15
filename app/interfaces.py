@@ -11,6 +11,44 @@ from datetime import datetime
 from typing import Any, Protocol
 
 
+class CryptoProviderPort(Protocol):
+    """Puerto para primitivas crypto de sesion (Fase 2)."""
+
+    def generate_ecdh_keypair(self) -> tuple[str, object]: ...
+
+    def derive_fernet_key(
+        self, private_key: object, remote_public_pem: str
+    ) -> bytes: ...
+
+    def encrypt(self, fernet_key: bytes, plaintext: str) -> str: ...
+
+    def decrypt(self, fernet_key: bytes, ciphertext: str) -> str: ...
+
+    def fingerprint_public_key(self, public_pem: str) -> str: ...
+
+
+class TransportLayerPort(Protocol):
+    """Puerto de transporte para frames de protocolo."""
+
+    async def connect(self, url: str, username: str) -> None: ...
+
+    async def send(self, frame: dict[str, Any]) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+class SecureSessionManagerPort(Protocol):
+    """Puerto para estado seguro de sesion y replay guard."""
+
+    def activate_secure_channel(
+        self, user_a: str, user_b: str, key: bytes, fp: str, now: int
+    ) -> None: ...
+
+    def validate_replay(
+        self, user_a: str, user_b: str, nonce: str, sent_at_iso: str, now: int
+    ) -> tuple[bool, dict[str, Any] | None]: ...
+
+
 class ClockPort(Protocol):
     """Puerto de tiempo para reglas temporales y pruebas deterministas."""
 
