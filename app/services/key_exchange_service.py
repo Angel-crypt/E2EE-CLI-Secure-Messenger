@@ -10,10 +10,11 @@ Implementa reglas operativas:
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from app.interfaces import ClockPort, SystemClock
-from app.protocol import make_error
+from app.protocol import TIMESTAMP_TOLERANCE_SECONDS, make_error
 from app.repositories.in_memory_repositories import InMemoryChannelRepository
 
 
@@ -41,6 +42,10 @@ class KeyExchangeService:
         self._timeout_seconds = timeout_seconds
         self._clock = clock or SystemClock()
         self._channel_repository = channel_repository or InMemoryChannelRepository()
+        self._session_keys: dict[str, bytes] = {}
+        self._remote_fingerprints: dict[str, str] = {}
+        self._seen_nonces: dict[str, set[str]] = {}
+        self._fingerprint_warnings: dict[str, dict[str, str]] = {}
 
     def start_handshake(
         self, user_a: str, user_b: str, now_seconds: int | None = None
@@ -124,6 +129,109 @@ class KeyExchangeService:
             established_at=current_seconds,
             invalidated_at=None,
         )
+
+    def activate_secure_channel(
+        self, user_a: str, user_b: str, key: bytes, fp: str, now: int
+    ) -> None:
+        """Activa canal seguro con key de sesión y fingerprint remota runtime."""
+        pair = self._pair_key(user_a, user_b)
+        existing = self._channel_repository.get_channel(pair)
+        peer_a = existing["peer_a"] if existing else user_a
+        peer_b = existing["peer_b"] if existing else user_b
+
+        previous_fp = self._remote_fingerprints.get(pair)
+        if previous_fp is not None and previous_fp != fp:
+            self._fingerprint_warnings[pair] = {
+                "event": "REMOTE_KEY_CHANGED",
+                "previous_fingerprint": previous_fp,
+                "current_fingerprint": fp,
+            }
+
+        self._session_keys[pair] = key
+        self._remote_fingerprints[pair] = fp
+        self._seen_nonces[pair] = set()
+
+        self._channel_repository.upsert_channel(
+            pair_key=pair,
+            peer_a=peer_a,
+            peer_b=peer_b,
+            state="ACTIVE",
+            started_at=existing["started_at"] if existing else now,
+            established_at=now,
+            invalidated_at=None,
+        )
+
+    def validate_replay(
+        self, user_a: str, user_b: str, nonce: str, sent_at_iso: str, now: int
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Valida timestamp+nonce antes de aceptar payload cifrado."""
+        pair = self._pair_key(user_a, user_b)
+        if self.channel_state(user_a, user_b) != "ACTIVE":
+            return (
+                False,
+                make_error(
+                    code="403_SECURE_CHANNEL_REQUIRED",
+                    message="No se pudo completar la operación solicitada.",
+                    to=user_a,
+                    details={"operation": "MESSAGE"},
+                    retriable=True,
+                ),
+            )
+
+        sent_at_seconds = self._parse_iso_timestamp_seconds(sent_at_iso)
+        if sent_at_seconds is None:
+            return (
+                False,
+                make_error(
+                    code="400_REPLAY_TIMESTAMP_INVALID",
+                    message="No se pudo completar la operación solicitada.",
+                    to=user_a,
+                    details={"operation": "MESSAGE"},
+                    retriable=False,
+                ),
+            )
+
+        if abs(now - sent_at_seconds) > TIMESTAMP_TOLERANCE_SECONDS:
+            return (
+                False,
+                make_error(
+                    code="400_REPLAY_TIMESTAMP_INVALID",
+                    message="No se pudo completar la operación solicitada.",
+                    to=user_a,
+                    details={"operation": "MESSAGE"},
+                    retriable=False,
+                ),
+            )
+
+        seen = self._seen_nonces.setdefault(pair, set())
+        if nonce in seen:
+            return (
+                False,
+                make_error(
+                    code="409_REPLAY_DETECTED",
+                    message="No se pudo completar la operación solicitada.",
+                    to=user_a,
+                    details={"operation": "MESSAGE"},
+                    retriable=False,
+                ),
+            )
+        seen.add(nonce)
+        return True, None
+
+    def get_session_key(self, user_a: str, user_b: str) -> bytes | None:
+        """Retorna key Fernet runtime para el par si existe."""
+        return self._session_keys.get(self._pair_key(user_a, user_b))
+
+    def get_remote_fingerprint(self, user_a: str, user_b: str) -> str | None:
+        """Retorna fingerprint remota observada para el par."""
+        return self._remote_fingerprints.get(self._pair_key(user_a, user_b))
+
+    def consume_fingerprint_warning(
+        self, user_a: str, user_b: str
+    ) -> dict[str, str] | None:
+        """Consume warning de cambio de fingerprint si existe."""
+        pair = self._pair_key(user_a, user_b)
+        return self._fingerprint_warnings.pop(pair, None)
 
     def can_send_message(
         self, sender: str, target: str, now_seconds: int | None = None
@@ -214,6 +322,14 @@ class KeyExchangeService:
         """
         current_seconds = self._resolve_now_seconds(now_seconds)
         self._channel_repository.invalidate_user_channels(username, current_seconds)
+        for pair in list(self._session_keys.keys()):
+            channel = self._channel_repository.get_channel(pair)
+            if not channel:
+                continue
+            if username not in {channel["peer_a"], channel["peer_b"]}:
+                continue
+            self._session_keys.pop(pair, None)
+            self._seen_nonces.pop(pair, None)
 
     def channel_state(self, user_a: str, user_b: str) -> str:
         """Obtiene estado actual del canal para un par.
@@ -239,3 +355,13 @@ class KeyExchangeService:
         if now_seconds is not None:
             return now_seconds
         return self._clock.now_seconds()
+
+    def _parse_iso_timestamp_seconds(self, timestamp: str) -> int | None:
+        normalized = timestamp[:-1] + "+00:00" if timestamp.endswith("Z") else timestamp
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
