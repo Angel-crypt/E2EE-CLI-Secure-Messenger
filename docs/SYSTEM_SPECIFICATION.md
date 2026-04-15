@@ -1,329 +1,202 @@
-# *E2EE-CLI Secure Messenger*
+# E2EE-CLI Secure Messenger — Especificación del Sistema
 
 ---
 
 ## 1. Propósito
 
-Sistema de mensajería en CLI que permite comunicación en tiempo real entre usuarios conectados, garantizando:
+Describir la arquitectura y requisitos del sistema de mensajería segura extremo a extremo, así como su estado por fases de implementación.
 
-* confidencialidad (E2EE)
-* integridad básica del canal
+Visión objetivo del proyecto:
+
+* intercambio de claves (p. ej. ECDH)
+* derivación de secretos (HKDF)
+* cifrado autenticado AEAD (p. ej. AES-GCM)
+* transporte asíncrono bidireccional (WebSockets)
+* arquitectura desacoplada para testabilidad y mantenibilidad
+
+En la fase vigente (Fase 1) ya están consolidados:
+
+* contrato de protocolo estable
+* reglas de sesión/presencia
+* flujo de handshake por estados
+* CLI operativa y predecible
 * manejo explícito de errores
-* comportamiento predecible
-
-El servidor **no tiene acceso al contenido de los mensajes**.
 
 ---
 
-## 2. Modelo del sistema
+## 2. Alcance por fases
 
-``` bash
-[ Cliente A ] ←→ [ Servidor (relay) ] ←→ [ Cliente B ]
-     |                                         |
-     └────── cifrado extremo a extremo ────────┘
+### Fase 1 — Base funcional local (IMPLEMENTADA)
+
+* Runtime local en memoria
+* CLI interactiva determinista
+* validación estricta de mensajes de protocolo
+* sesión única por usuario
+* presencia (`online/offline`) y listado `/users`
+* bloqueo de `MESSAGE` sin canal `ACTIVE`
+* handshake on-demand por estado de canal
+* notificaciones dirigidas en buzón local
+
+### Fase 2 — Implementación completa del objetivo académico (PENDIENTE)
+
+* criptografía real ECDH + HKDF + AEAD (AES-GCM)
+* transporte websocket real cliente-servidor (asíncrono)
+* integración E2EE end-to-end sobre canal no confiable
+
+Nota: Fase 2 mantiene estilo de prototipo local/entorno controlado; no implica despliegue público en Internet.
+
+---
+
+## 3. Arquitectura operativa vigente (Fase 1)
+
+```text
+CLI (prompt-toolkit + rich)
+        |
+        v
+AppController (orquestación)
+        |
+        v
+Servicios de dominio (session/chat/key_exchange)
+        |
+        v
+Repositorios en memoria
 ```
 
----
-
-## 3. Componentes
-
-### Cliente
-
-* identidad (`username`)
-* generación de llaves (ECC)
-* intercambio de llaves
-* cifrado / descifrado
-* CLI interactiva
-* manejo de estados
+Módulos de infraestructura (`infrastructure/crypto.py`, `infrastructure/websocket_client.py`) están definidos para Fase 2.
 
 ---
 
-### Servidor
+## 4. Constantes normativas (Fase 1)
 
-* registro de usuarios activos
-* validación de username único
-* routing de mensajes
-* gestión de presencia consultable por comandos CLI (`/users`)
-* notificación de cambios mediante mensajes `ERROR`/estado local (sin tipo `USER_EVENT` dedicado)
+Esta sección es la referencia única para constantes de comportamiento de la Fase 1.
 
----
+| Constante | Valor | Fuente de implementación |
+| --- | --- | --- |
+| `KEY_EXCHANGE_TIMEOUT_SECONDS` | `5` | `app/services/key_exchange_service.py` |
+| `TIMESTAMP_TOLERANCE_SECONDS` | `120` | `app/protocol.py` |
+| Estados de canal válidos | `NONE`, `ESTABLISHING`, `ACTIVE`, `INVALID` | `app/services/key_exchange_service.py` |
+| Estados de usuario válidos | `online`, `offline` | `app/repositories/in_memory_repositories.py` |
 
-## 4. Seguridad (by design)
-
-### Cifrado
-
-* ECDH → intercambio de secreto
-* HKDF → derivación de clave
-* AES (Fernet) → cifrado de mensajes
+Regla: ninguna documentación debe declarar valores distintos a esta tabla para Fase 1.
 
 ---
 
-### Propiedades
+## 5. Reglas duras del sistema
 
-* End-to-End Encryption
-* Forward secrecy (por sesión)
-* Zero-knowledge server
-
----
-
-### Reglas duras
-
-* No se envían mensajes sin shared key
-* No hay fallback inseguro
-* No hay fallos silenciosos
+* No se envían `MESSAGE` sin canal `ACTIVE`.
+* No hay fallback inseguro a envío en claro por bypass de canal.
+* No hay fallos silenciosos: los errores se devuelven como `ERROR` estructurado.
+* En Fase 1 no hay cifrado real de contenido; el payload de `MESSAGE` es mock para validar flujo.
 
 ---
 
-## 5. Flujos clave
+## 6. Protocolo (resumen operativo)
 
-### Conexión
+Tipos válidos:
 
-``` bash
-Cliente → genera llaves
-Cliente → register(username, pubkey)
-Servidor → valida / responde
-Cliente → consulta usuarios activos con /users cuando lo requiera
-```
+* `REGISTER`
+* `HANDSHAKE_INIT`
+* `MESSAGE`
+* `ERROR`
 
----
+Estructura base:
 
-### Mensaje normal
-
-``` bash
-if shared_key:
-    encrypt → send → decrypt
-else:
-    establecer canal → luego enviar
-```
-
----
-
-### Usuario offline
-
-``` bash
-/chat bob
-→ ERROR: usuario no disponible
-```
-
----
-
-### Key exchange (on-demand)
-
-``` bash
-Intento de mensaje
-→ no hay shared_key
-→ enviar HANDSHAKE_INIT
-→ derivar clave
-→ continuar
-```
-
----
-
-### Timeout
-
-``` bash
-No respuesta de pubkey
-→ ERROR (5–10s)
-→ abortar operación
-```
-
----
-
-### Reconexión
-
-``` bash
-Bob se reconecta
-→ nueva public key
-→ invalidar shared keys
-→ notificar cambio
-```
-
----
-
-### Error de descifrado
-
-``` bash
-Mensaje inválido
-→ notificar
-→ borrar clave
-→ reintercambiar
-```
-
----
-
-## 6. Interfaz CLI
-
-### Comandos
-
-``` bash
-/user <name>
-/users
-/chat <user>
-/msg <user> <mensaje>
-/exit
-/help
-```
-
----
-
-### Estados visibles
-
-* `[INFO] usuario conectado`
-* `[ERROR] usuario no disponible`
-* `[WARNING] clave cambiada`
-* `[INFO] estableciendo canal seguro`
-
----
-
-### Modos
-
-* modo comando
-* modo chat (contexto persistente)
-
----
-
-## 7. Protocolo (conceptual)
-
-### Tipos de mensajes
-
-* REGISTER
-* HANDSHAKE_INIT
-* MESSAGE (encrypted)
-* ERROR
-
----
-
-### Estructura base (obligatoriedad por tipo)
-
-``` json
+```json
 {
-  message_id,
-  timestamp,
-  type,
-  from,
-  to,
-  payload
+  "message_id": "uuid",
+  "timestamp": "iso8601-utc",
+  "type": "REGISTER|HANDSHAKE_INIT|MESSAGE|ERROR",
+  "from": "username",
+  "to": "username-opcional-según-tipo",
+  "payload": {}
 }
 ```
 
-Regla: la obligatoriedad de `to` es por tipo, no global. El objeto anterior representa el universo de campos posibles, no un conjunto obligatorio universal.
+Reglas clave:
 
-* `REGISTER` -> `to` no requerido
-* `HANDSHAKE_INIT` -> `to` requerido
-* `MESSAGE` -> `to` requerido
-* `ERROR` -> `to` opcional
-
-Matriz de obligatoriedad:
-
-| Campo | REGISTER | HANDSHAKE_INIT | MESSAGE | ERROR |
-|---|---|---|---|---|
-| `message_id` | requerido | requerido | requerido | requerido |
-| `timestamp` | requerido | requerido | requerido | requerido |
-| `type` | requerido | requerido | requerido | requerido |
-| `from` | requerido | requerido | requerido | requerido |
-| `to` | no requerido | requerido | requerido | opcional |
-| `payload` | requerido | requerido | requerido | requerido |
+* `to` obligatorio por tipo (ver SRS-03).
+* sin campos extra en raíz ni `payload`.
+* validación de timestamp con tolerancia ±120s.
+* errores de validación devuelven `ERROR` con código específico.
 
 ---
 
-### Payload estricto y sin campos extra
+## 7. Flujos clave (Fase 1)
 
-* El `payload` se valida de forma estricta por `type`.
-* No se aceptan campos extra en raíz ni dentro de `payload`.
-* Todo mensaje inválido se rechaza antes de cualquier procesamiento.
+### Registro
 
----
+1. Cliente envía `REGISTER`.
+2. Sistema valida contrato.
+3. Si username no tiene sesión activa: crea sesión y estado `online`.
+4. Si ya está activo: `ERROR 409_USERNAME_TAKEN`.
 
-### Errores estructurados
+### Envío de mensaje
 
-Los errores se transportan como mensajes `ERROR` con `payload` estructurado:
+1. Usuario intenta `MESSAGE`.
+2. Si canal no está `ACTIVE`, se inicia/garantiza handshake y se responde `403_SECURE_CHANNEL_REQUIRED`.
+3. Una vez canal `ACTIVE`, `MESSAGE` se acepta.
 
-``` json
-{
-  "code": "404_USER_OFFLINE",
-  "message": "El usuario destino no está disponible",
-  "details": {},
-  "retriable": true
-}
-```
+### Timeout de handshake
 
-Categorías usadas:
+1. Canal en `ESTABLISHING`.
+2. Si supera 5 segundos sin completarse: pasa a `INVALID`.
+3. Se responde `504_KEY_EXCHANGE_TIMEOUT`.
 
-* 4xx -> formato, validación y estado del cliente/protocolo
-* 5xx -> fallas operativas del servidor
+### Reconexión/desconexión
 
-Regla de direccionamiento para `ERROR`:
-
-* con `to`: entrega unicast al usuario destino
-* sin `to`: error local/contextual, no broadcast
-
-Referencia normativa: `docs/SRS/SRS-03 — Protocolo de Comunicación.md`.
+1. Cambio de sesión del usuario.
+2. Canales asociados pasan a `INVALID`.
+3. Se requiere nuevo `HANDSHAKE_INIT` antes de `MESSAGE`.
 
 ---
 
-## 8. Estados del sistema
+## 8. Interfaz CLI (Fase 1)
 
-### Por usuario
+Comandos operativos:
 
-* online
-* offline
-
----
-
-### Por canal
-
-* NONE
-* ESTABLISHING
-* ACTIVE
-* INVALID
-
----
-
-## 9. Limitaciones
-
-* sin autenticación fuerte → posible MITM
-* sin persistencia
-* sin mensajes offline
-* dependencia de conexión simultánea
+* `/user <name>`
+* `/logout`
+* `/users`
+* `/chat <user>`
+* `/msg <user> <texto>`
+* `/notif`
+* `/poll on|off`
+* `/theme <default|minimal|contrast|matrix>`
+* `/status`
+* `/clear`
+* `/leave`
+* `/help`
+* `/exit`
 
 ---
 
-## 10. Decisiones clave
+## 9. Relación normativa con SRS
 
-* username único obligatorio
-* 1 sesión por usuario
-* claves efímeras por ejecución
-* intercambio de llaves bajo demanda
-* bloqueo hasta canal seguro
-* timeout en handshake
-* detección de cambio de identidad
-* notificaciones de presencia simples
-* sin frameworks web
+* `SRS-01` — CLI Core
+* `SRS-02` — Gestión de Sesión y Usuarios
+* `SRS-03` — Protocolo de Comunicación
+* `SRS-04` — Key Exchange
+* `SRS-06` — Manejo de Errores y Resiliencia
+* `SRS-07` — Estados del Sistema
 
----
+Requisitos de Fase 2 (no implementados aún):
 
-## 11. Enfoque de validación
-
-El sistema debe demostrar:
-
-### ✔ Funcionalidad
-
-* envío y recepción correcta
-* manejo de usuarios online/offline
-* reconexión estable
+* `SRS-05` — Criptografía
+* `SRS-08` — Transporte y Enrutamiento Real-time
 
 ---
 
-### ✔ Seguridad
+## 10. Criterios de salida por fase
 
-* mensajes no legibles en servidor
-* fallo al usar claves incorrectas
-* reintercambio automático funcional
+### Salida de Fase 1 (base funcional local)
 
----
+* Documentación sin contradicciones internas de Fase 1.
+* SRS homogéneos en formato y trazabilidad.
+* Constantes alineadas entre SRS/spec/código.
+* Tests de Fase 1 en verde.
 
-### ✔ Robustez
+### Salida de Fase 2 (objetivo académico completo)
 
-* no hay fallos silenciosos
-* errores siempre visibles
-* sistema no se congela
+* E2EE real implementado (ECDH + HKDF + AEAD).
+* Transporte WebSocket asíncrono integrado.
+* Pruebas de integración E2EE sobre canal no confiable.
