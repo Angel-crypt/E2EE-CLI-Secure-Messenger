@@ -46,6 +46,7 @@ class KeyExchangeService:
         self._remote_fingerprints: dict[str, str] = {}
         self._seen_nonces: dict[str, set[str]] = {}
         self._fingerprint_warnings: dict[str, dict[str, str]] = {}
+        self._pending_private_keys: dict[str, object] = {}
 
     def start_handshake(
         self, user_a: str, user_b: str, now_seconds: int | None = None
@@ -222,6 +223,16 @@ class KeyExchangeService:
         """Retorna key Fernet runtime para el par si existe."""
         return self._session_keys.get(self._pair_key(user_a, user_b))
 
+    def set_pending_private_key(
+        self, user_a: str, user_b: str, private_key: object
+    ) -> None:
+        """Guarda clave privada efímera local para completar handshake."""
+        self._pending_private_keys[self._pair_key(user_a, user_b)] = private_key
+
+    def pop_pending_private_key(self, user_a: str, user_b: str) -> object | None:
+        """Consume clave privada efímera local del handshake en curso."""
+        return self._pending_private_keys.pop(self._pair_key(user_a, user_b), None)
+
     def get_remote_fingerprint(self, user_a: str, user_b: str) -> str | None:
         """Retorna fingerprint remota observada para el par."""
         return self._remote_fingerprints.get(self._pair_key(user_a, user_b))
@@ -330,6 +341,7 @@ class KeyExchangeService:
                 continue
             self._session_keys.pop(pair, None)
             self._seen_nonces.pop(pair, None)
+            self._pending_private_keys.pop(pair, None)
 
     def channel_state(self, user_a: str, user_b: str) -> str:
         """Obtiene estado actual del canal para un par.
