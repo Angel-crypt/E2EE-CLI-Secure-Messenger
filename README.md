@@ -1,6 +1,6 @@
 # 🔐 E2EE-CLI Secure Messenger
 
-![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.13+-blue.svg)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![CI](https://github.com/Angel-crypt/E2EE-CLI-Secure-Messenger/actions/workflows/ci.yml/badge.svg?branch=main)
 
@@ -25,6 +25,16 @@ Demostrar cómo construir un sistema de mensajería con cifrado de extremo a ext
 
 El sistema **reduce la confianza en el servidor**, pero **no la elimina completamente**.
 
+### Estado actual de alcance (scope lock)
+
+Esta versión está enfocada en **Fase 1: base funcional local (pre-implementación completa)**:
+
+* ✅ protocolo, sesión/presencia, handshake por estados, CLI y errores estructurados
+* ⏳ criptografía E2EE real (ECDH + HKDF + AEAD) — objetivo de Fase 2
+* ⏳ transporte asíncrono WebSocket bidireccional — objetivo de Fase 2
+
+> Importante: estos componentes **no están descartados**. Están definidos como parte obligatoria del proyecto y se implementan en la siguiente fase.
+
 ---
 
 ## 🛡️ Modelo de amenaza
@@ -45,7 +55,7 @@ El sistema **reduce la confianza en el servidor**, pero **no la elimina completa
 
 ---
 
-## 🔄 Flujo criptográfico
+## 🔄 Flujo criptográfico (objetivo del proyecto)
 
 1. Generación de claves efímeras por cliente
 2. Intercambio de claves mediante ECDH
@@ -55,14 +65,12 @@ El sistema **reduce la confianza en el servidor**, pero **no la elimina completa
 
 ---
 
-## 🔐 Seguridad
+## 🔐 Seguridad (estado actual)
 
-* Intercambio de claves: ECDH
-* Derivación: HKDF (SHA-256)
-* Cifrado autenticado: Fernet (AES-128 + HMAC-SHA256)
-* Claves efímeras por sesión
-* No se envían mensajes sin canal cifrado
-* Manejo explícito de errores criptográficos
+* En la fase actual, el sistema valida reglas de canal seguro y protocolo en runtime local
+* No se envían mensajes si el canal no está `ACTIVE`
+* Manejo explícito de errores estructurados (`ERROR`)
+* ECDH/HKDF/AEAD reales quedan pendientes para la Fase 2
 
 ### Identidad
 
@@ -77,7 +85,8 @@ El sistema **reduce la confianza en el servidor**, pero **no la elimina completa
 * Vulnerable a MITM
 * Sin persistencia de mensajes
 * Sin soporte offline
-* Requiere conexión simultánea
+* Sin transporte websocket real en Fase 1
+* Sin cifrado E2EE real en Fase 1
 
 ---
 
@@ -111,9 +120,9 @@ Esto habilita:
 uv run python main.py
 ```
 
-Notas de esta fase:
+Notas de esta fase (Fase 1: base funcional local):
 
-* CLI interactivo local (sin websocket todavía)
+* CLI interactivo local (sin websocket real todavía)
 * estado en memoria por ejecución
 * notificaciones push dirigidas vía buzón local (`/notif` + polling)
 
