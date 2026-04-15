@@ -10,7 +10,9 @@ No contiene logica pesada de chat; esa vive en `ChatService`.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from app.interfaces import (
     AppControllerPort,
@@ -50,6 +52,7 @@ class AppController(AppControllerPort):
         """
         self._clock = clock or SystemClock()
         self._notifications_bus = notifications or InMemoryNotificationBus()
+        self._crypto = crypto_provider
 
         self._key_exchange = key_exchange_service or KeyExchangeService(
             timeout_seconds=5,
@@ -198,6 +201,178 @@ class AppController(AppControllerPort):
         items = self._notifications_bus.pull_for_user(username)
         return self._ok({"notifications": items})
 
+    def create_handshake_offer(
+        self, user_a: str, user_b: str, now_seconds: int | None = None
+    ) -> dict[str, Any]:
+        """Crea frame HANDSHAKE_INIT con clave efímera local para transporte real."""
+        current_seconds = self._resolve_now_seconds(now_seconds)
+        if not self._user_service.is_user_active(user_a):
+            return self._fail(
+                make_error(
+                    code="401_NOT_REGISTERED",
+                    message="No se pudo completar la operación solicitada.",
+                    to=user_a,
+                    details={"operation": "HANDSHAKE_INIT"},
+                    retriable=False,
+                )
+            )
+        if not self._user_service.is_user_active(user_b):
+            return self._fail(
+                make_error(
+                    code="404_USER_OFFLINE",
+                    message="No se pudo completar la operación solicitada.",
+                    to=user_a,
+                    details={"operation": "HANDSHAKE_INIT"},
+                    retriable=True,
+                )
+            )
+
+        if self._crypto is None:
+            return self._fail(self._internal_error("HANDSHAKE_INIT"))
+
+        public_key, private_key = self._crypto.generate_ecdh_keypair()
+        self._key_exchange.set_pending_private_key(user_a, user_b, private_key)
+
+        frame = {
+            "message_id": str(uuid4()),
+            "timestamp": self._now_iso(),
+            "type": "HANDSHAKE_INIT",
+            "from": user_a,
+            "to": user_b,
+            "payload": {
+                "username": user_a,
+                "public_key": public_key,
+                "nonce": uuid4().hex,
+                "reason": "ON_DEMAND",
+            },
+        }
+
+        started = self.handshake_init(frame, current_seconds)
+        if not started["ok"]:
+            return started
+
+        return self._ok(
+            {
+                "event": "HANDSHAKE_STARTED",
+                "from": user_a,
+                "to": user_b,
+                "state": self._key_exchange.channel_state(user_a, user_b),
+                "frame": frame,
+            }
+        )
+
+    def process_handshake_frame(
+        self, raw_message: dict[str, Any], now_seconds: int | None = None
+    ) -> dict[str, Any]:
+        """Procesa frame HANDSHAKE_INIT remoto y activa canal cifrado."""
+        current_seconds = self._resolve_now_seconds(now_seconds)
+        valid, error_or_message = self._validate_or_error(raw_message)
+        if not valid:
+            return self._fail(error_or_message)
+
+        message = error_or_message
+        if message["type"] != "HANDSHAKE_INIT":
+            return self._fail(
+                make_error(
+                    code="400_INVALID_TYPE",
+                    message="No se pudo completar la operación solicitada.",
+                    to=message.get("to"),
+                    details={"operation": "HANDSHAKE_INIT"},
+                    retriable=False,
+                )
+            )
+
+        sender = message["from"]
+        target = message["to"]
+        if not self._user_service.is_user_active(target):
+            return self._fail(
+                make_error(
+                    code="401_NOT_REGISTERED",
+                    message="No se pudo completar la operación solicitada.",
+                    to=target,
+                    details={"operation": "HANDSHAKE_INIT"},
+                    retriable=False,
+                )
+            )
+
+        if self._crypto is None:
+            return self._fail(self._internal_error("HANDSHAKE_INIT"))
+
+        remote_public = message["payload"]["public_key"]
+        local_private = self._key_exchange.pop_pending_private_key(sender, target)
+        response_frame: dict[str, Any] | None = None
+
+        try:
+            if local_private is None:
+                local_public, local_private = self._crypto.generate_ecdh_keypair()
+                session_key = self._crypto.derive_fernet_key(
+                    local_private, remote_public
+                )
+                response_frame = {
+                    "message_id": str(uuid4()),
+                    "timestamp": self._now_iso(),
+                    "type": "HANDSHAKE_INIT",
+                    "from": target,
+                    "to": sender,
+                    "payload": {
+                        "username": target,
+                        "public_key": local_public,
+                        "nonce": uuid4().hex,
+                        "reason": "ON_DEMAND",
+                    },
+                }
+            else:
+                session_key = self._crypto.derive_fernet_key(
+                    local_private, remote_public
+                )
+        except ValueError:
+            return self._fail(
+                make_error(
+                    code="400_INVALID_PAYLOAD",
+                    message="No se pudo completar la operación solicitada.",
+                    to=target,
+                    details={"operation": "HANDSHAKE_INIT"},
+                    retriable=False,
+                )
+            )
+
+        remote_fp = self._crypto.fingerprint_public_key(remote_public)
+        self._key_exchange.activate_secure_channel(
+            sender, target, key=session_key, fp=remote_fp, now=current_seconds
+        )
+        self._publish_fingerprint_warning(target, sender)
+
+        return self._ok(
+            {
+                "event": "HANDSHAKE_COMPLETED",
+                "from": sender,
+                "to": target,
+                "state": self._key_exchange.channel_state(sender, target),
+                "frame": response_frame,
+            }
+        )
+
+    def receive_message(
+        self, raw_message: dict[str, Any], now_seconds: int | None = None
+    ) -> dict[str, Any]:
+        """Valida replay y descifra MESSAGE entrante para CLI."""
+        current_seconds = self._resolve_now_seconds(now_seconds)
+        ok, plaintext, error = self._chat_service.decrypt_incoming_message(
+            raw_message, current_seconds
+        )
+        if not ok:
+            return self._fail(error or self._internal_error("MESSAGE"))
+
+        validated = validate_message(raw_message)
+        return self._ok(
+            {
+                "event": "MESSAGE_RECEIVED",
+                "from": validated["from"],
+                "to": validated["to"],
+                "plaintext": plaintext,
+            }
+        )
+
     def complete_handshake(
         self, user_a: str, user_b: str, now_seconds: int | None = None
     ) -> dict[str, Any]:
@@ -280,7 +455,37 @@ class AppController(AppControllerPort):
             return
         self._notifications_bus.publish_to_user(target, error)
 
+    def _publish_fingerprint_warning(self, local_user: str, remote_user: str) -> None:
+        warning = self._key_exchange.consume_fingerprint_warning(
+            remote_user, local_user
+        )
+        if warning is None:
+            return
+        self._notifications_bus.publish_to_user(
+            local_user,
+            make_error(
+                code="409_REMOTE_KEY_CHANGED",
+                message="No se pudo completar la operación solicitada.",
+                to=local_user,
+                details={
+                    "operation": "HANDSHAKE_INIT",
+                    "event": warning["event"],
+                    "previous_fingerprint": warning["previous_fingerprint"],
+                    "current_fingerprint": warning["current_fingerprint"],
+                },
+                retriable=True,
+            ),
+        )
+
     def _resolve_now_seconds(self, now_seconds: int | None) -> int:
         if now_seconds is not None:
             return now_seconds
         return self._clock.now_seconds()
+
+    def _now_iso(self) -> str:
+        return (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
