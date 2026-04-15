@@ -49,6 +49,8 @@ def _message_msg(sender: str, target: str) -> dict:
             "ciphertext": "hola",
             "encoding": "base64url",
             "algorithm": "FERNET",
+            "nonce": "YjRjNDY2ZjQwYw",
+            "sent_at": now_iso,
         },
     }
 
