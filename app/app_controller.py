@@ -15,6 +15,7 @@ from typing import Any
 from app.interfaces import (
     AppControllerPort,
     ClockPort,
+    CryptoProviderPort,
     InMemoryNotificationBus,
     NotificationPort,
     SystemClock,
@@ -33,6 +34,7 @@ class AppController(AppControllerPort):
         user_service: SessionUserService | None = None,
         key_exchange_service: KeyExchangeService | None = None,
         chat_service: ChatService | None = None,
+        crypto_provider: CryptoProviderPort | None = None,
         clock: ClockPort | None = None,
         notifications: NotificationPort | None = None,
     ) -> None:
@@ -42,6 +44,7 @@ class AppController(AppControllerPort):
             user_service: Servicio de sesion/presencia.
             key_exchange_service: Servicio de estado de canal.
             chat_service: Servicio de validacion/estructura de chat.
+            crypto_provider: Puerto crypto para cifrado/descifrado de chat.
             clock: Puerto de reloj para tiempos de dominio.
             notifications: Puerto de notificaciones dirigidas.
         """
@@ -59,6 +62,7 @@ class AppController(AppControllerPort):
         self._chat_service = chat_service or ChatService(
             user_service=self._user_service,
             key_exchange_service=self._key_exchange,
+            crypto_provider=crypto_provider,
         )
 
     def register(self, raw_message: dict[str, Any]) -> dict[str, Any]:
