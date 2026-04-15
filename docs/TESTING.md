@@ -39,18 +39,25 @@ Ejemplos de alcance:
 
 Propósito: validar flujos reales entre componentes.
 
-Reglas:
+Reglas por fase:
 
-* usar infraestructura real cuando aplique (crypto real, websockets reales, etc.)
-* evitar reemplazar componentes criticos con fakes
-* aceptan mayor costo de ejecucion
-* validan comportamiento end-to-end de un flujo
+* **Fase 1 (base funcional, actual):** integración entre componentes reales de aplicación en memoria (controller + servicios + repositorios), sin red/crypto reales aún.
+* **Fase 2 (implementación completa):** incorporar websocket/crypto reales en pruebas de integración correspondientes.
+* evitar reemplazar componentes críticos de la fase evaluada por fakes artificiales.
+* aceptan mayor costo de ejecución que unitarias.
+* validan comportamiento end-to-end del flujo definido para la fase.
 
-Ejemplos de alcance:
+Ejemplos de alcance (fase actual):
+
+* registro -> handshake -> envío bloqueado/aceptado según estado de canal
+* invalidación de canal por reconexión
+* notificaciones dirigidas en buzón local
+
+Ejemplos de alcance (fase futura):
 
 * cliente <-> servidor por websocket
-* handshake + envio de mensaje cifrado
-* manejo real de desconexion/reconexion
+* handshake + envío de mensaje con crypto real
+* manejo real de desconexión/reconexión a nivel transporte
 
 ---
 
