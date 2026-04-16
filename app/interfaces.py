@@ -27,30 +27,6 @@ class CryptoProviderPort(Protocol):
     def fingerprint_public_key(self, public_pem: str) -> str: ...
 
 
-class TransportLayerPort(Protocol):
-    """Puerto de transporte para frames de protocolo."""
-
-    async def connect(self, url: str, username: str) -> None: ...
-
-    async def send(self, frame: dict[str, Any]) -> None: ...
-
-    async def receive(self) -> dict[str, Any]: ...
-
-    async def close(self) -> None: ...
-
-
-class SecureSessionManagerPort(Protocol):
-    """Puerto para estado seguro de sesion y replay guard."""
-
-    def activate_secure_channel(
-        self, user_a: str, user_b: str, key: bytes, fp: str, now: int
-    ) -> None: ...
-
-    def validate_replay(
-        self, user_a: str, user_b: str, nonce: str, sent_at_iso: str, now: int
-    ) -> tuple[bool, dict[str, Any] | None]: ...
-
-
 class ClockPort(Protocol):
     """Puerto de tiempo para reglas temporales y pruebas deterministas."""
 
@@ -69,34 +45,6 @@ class NotificationPort(Protocol):
     def pull_for_user(self, username: str) -> list[dict[str, Any]]:
         """Retorna y limpia mensajes dirigidos del usuario."""
         ...
-
-
-class AppControllerPort(Protocol):
-    """Contrato minimo para controladores de aplicacion."""
-
-    def register(self, raw_message: dict[str, Any]) -> dict[str, Any]: ...
-
-    def handshake_init(
-        self, raw_message: dict[str, Any], now_seconds: int | None = None
-    ) -> dict[str, Any]: ...
-
-    def send_message(
-        self, raw_message: dict[str, Any], now_seconds: int | None = None
-    ) -> dict[str, Any]: ...
-
-    def send_text_message(
-        self,
-        sender: str,
-        target: str,
-        text: str,
-        now_seconds: int | None = None,
-    ) -> dict[str, Any]: ...
-
-    def disconnect(self, username: str) -> dict[str, Any]: ...
-
-    def list_users(self) -> dict[str, Any]: ...
-
-    def pull_notifications(self, username: str) -> dict[str, Any]: ...
 
 
 class SystemClock(ClockPort):
