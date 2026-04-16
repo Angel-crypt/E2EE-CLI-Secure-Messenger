@@ -15,7 +15,6 @@ from typing import Any
 
 from app.interfaces import ClockPort, SystemClock
 from app.protocol import TIMESTAMP_TOLERANCE_SECONDS, make_error
-from app.repositories.in_memory_repositories import InMemoryChannelRepository
 
 
 class KeyExchangeService:
@@ -30,18 +29,16 @@ class KeyExchangeService:
         self,
         timeout_seconds: int = 5,
         clock: ClockPort | None = None,
-        channel_repository: InMemoryChannelRepository | None = None,
     ) -> None:
         """Inicializa almacenamiento runtime de canales.
 
         Args:
             timeout_seconds: Ventana maxima para handshake en estado ESTABLISHING.
             clock: Puerto de reloj para validaciones temporales.
-            channel_repository: Repositorio en memoria de estado de canales.
         """
         self._timeout_seconds = timeout_seconds
         self._clock = clock or SystemClock()
-        self._channel_repository = channel_repository or InMemoryChannelRepository()
+        self._channels: dict[str, dict] = {}
         self._session_keys: dict[str, bytes] = {}
         self._remote_fingerprints: dict[str, str] = {}
         self._seen_nonces: dict[str, set[str]] = {}
@@ -66,20 +63,20 @@ class KeyExchangeService:
         current_seconds = self._resolve_now_seconds(now_seconds)
 
         pair = self._pair_key(user_a, user_b)
-        channel = self._channel_repository.get_channel(pair)
+        channel = self._channels.get(pair)
 
-        if channel and channel["state"] == "ACTIVE":
+        if channel and channel["state"] in {"ACTIVE", "ESTABLISHING"}:
             return True, None
 
-        self._channel_repository.upsert_channel(
-            pair_key=pair,
-            peer_a=user_a,
-            peer_b=user_b,
-            state="ESTABLISHING",
-            started_at=current_seconds,
-            established_at=None,
-            invalidated_at=None,
-        )
+        self._channels[pair] = {
+            "pair_key": pair,
+            "peer_a": user_a,
+            "peer_b": user_b,
+            "state": "ESTABLISHING",
+            "started_at": current_seconds,
+            "established_at": None,
+            "invalidated_at": None,
+        }
         return True, None
 
     def ensure_handshake_started(
@@ -98,45 +95,19 @@ class KeyExchangeService:
             - ``started=False`` si no fue necesario (ya ACTIVE).
             - ``error`` en caso de fallo inesperado (actualmente ninguno).
         """
-        if self.channel_state(user_a, user_b) == "ACTIVE":
+        if self.channel_state(user_a, user_b) in {"ACTIVE", "ESTABLISHING"}:
             return False, None
         ok, error = self.start_handshake(user_a, user_b, now_seconds)
         if not ok:
             return False, error
         return True, None
 
-    def complete_handshake(
-        self, user_a: str, user_b: str, now_seconds: int | None = None
-    ) -> None:
-        """Marca handshake como completado y activa el canal.
-
-        Args:
-            user_a: Usuario participante A.
-            user_b: Usuario participante B.
-            now_seconds: Tiempo actual en segundos.
-        """
-        current_seconds = self._resolve_now_seconds(now_seconds)
-        pair = self._pair_key(user_a, user_b)
-        existing = self._channel_repository.get_channel(pair)
-        peer_a = existing["peer_a"] if existing else user_a
-        peer_b = existing["peer_b"] if existing else user_b
-
-        self._channel_repository.upsert_channel(
-            pair_key=pair,
-            peer_a=peer_a,
-            peer_b=peer_b,
-            state="ACTIVE",
-            started_at=existing["started_at"] if existing else None,
-            established_at=current_seconds,
-            invalidated_at=None,
-        )
-
     def activate_secure_channel(
         self, user_a: str, user_b: str, key: bytes, fp: str, now: int
     ) -> None:
         """Activa canal seguro con key de sesión y fingerprint remota runtime."""
         pair = self._pair_key(user_a, user_b)
-        existing = self._channel_repository.get_channel(pair)
+        existing = self._channels.get(pair)
         peer_a = existing["peer_a"] if existing else user_a
         peer_b = existing["peer_b"] if existing else user_b
 
@@ -152,15 +123,15 @@ class KeyExchangeService:
         self._remote_fingerprints[pair] = fp
         self._seen_nonces[pair] = set()
 
-        self._channel_repository.upsert_channel(
-            pair_key=pair,
-            peer_a=peer_a,
-            peer_b=peer_b,
-            state="ACTIVE",
-            started_at=existing["started_at"] if existing else now,
-            established_at=now,
-            invalidated_at=None,
-        )
+        self._channels[pair] = {
+            "pair_key": pair,
+            "peer_a": peer_a,
+            "peer_b": peer_b,
+            "state": "ACTIVE",
+            "started_at": existing["started_at"] if existing else now,
+            "established_at": now,
+            "invalidated_at": None,
+        }
 
     def validate_replay(
         self, user_a: str, user_b: str, nonce: str, sent_at_iso: str, now: int
@@ -233,9 +204,9 @@ class KeyExchangeService:
         """Consume clave privada efímera local del handshake en curso."""
         return self._pending_private_keys.pop(self._pair_key(user_a, user_b), None)
 
-    def get_remote_fingerprint(self, user_a: str, user_b: str) -> str | None:
-        """Retorna fingerprint remota observada para el par."""
-        return self._remote_fingerprints.get(self._pair_key(user_a, user_b))
+    def has_pending_private_key(self, user_a: str, user_b: str) -> bool:
+        """Indica si existe clave privada efímera pendiente para el par."""
+        return self._pair_key(user_a, user_b) in self._pending_private_keys
 
     def consume_fingerprint_warning(
         self, user_a: str, user_b: str
@@ -243,84 +214,6 @@ class KeyExchangeService:
         """Consume warning de cambio de fingerprint si existe."""
         pair = self._pair_key(user_a, user_b)
         return self._fingerprint_warnings.pop(pair, None)
-
-    def can_send_message(
-        self, sender: str, target: str, now_seconds: int | None = None
-    ) -> tuple[bool, dict[str, Any] | None]:
-        """Valida si existe canal ACTIVE para permitir MESSAGE.
-
-        Args:
-            sender: Usuario emisor.
-            target: Usuario destinatario.
-            now_seconds: Tiempo actual en segundos.
-
-        Returns:
-            Tupla ``(ok, error)``:
-            - ``ok=True`` si el canal esta ACTIVE.
-            - ``ok=False`` y `ERROR` 403 si no hay canal activo.
-        """
-        _ = now_seconds
-        if self.channel_state(sender, target) != "ACTIVE":
-            return (
-                False,
-                make_error(
-                    code="403_SECURE_CHANNEL_REQUIRED",
-                    message="No se pudo completar la operación solicitada.",
-                    to=sender,
-                    details={"operation": "MESSAGE"},
-                    retriable=True,
-                ),
-            )
-        return True, None
-
-    def check_timeout(
-        self, user_a: str, user_b: str, now_seconds: int | None = None
-    ) -> tuple[bool, dict[str, Any] | None]:
-        """Evalua timeout de handshake para un par de usuarios.
-
-        Args:
-            user_a: Usuario participante A.
-            user_b: Usuario participante B.
-            now_seconds: Tiempo actual en segundos.
-
-        Returns:
-            Tupla ``(timed_out, error)``:
-            - ``timed_out=True`` y `ERROR` 504 si expiro handshake.
-            - ``timed_out=False`` y ``None`` si no aplica timeout.
-        """
-        current_seconds = self._resolve_now_seconds(now_seconds)
-
-        pair = self._pair_key(user_a, user_b)
-        channel = self._channel_repository.get_channel(pair)
-        if (
-            not channel
-            or channel["state"] != "ESTABLISHING"
-            or channel["started_at"] is None
-        ):
-            return False, None
-
-        if current_seconds - channel["started_at"] <= self._timeout_seconds:
-            return False, None
-
-        self._channel_repository.upsert_channel(
-            pair_key=pair,
-            peer_a=channel["peer_a"],
-            peer_b=channel["peer_b"],
-            state="INVALID",
-            started_at=channel["started_at"],
-            established_at=channel["established_at"],
-            invalidated_at=current_seconds,
-        )
-        return (
-            True,
-            make_error(
-                code="504_KEY_EXCHANGE_TIMEOUT",
-                message="No se pudo completar la operación solicitada.",
-                to=channel["peer_a"],
-                details={"operation": "HANDSHAKE_INIT"},
-                retriable=True,
-            ),
-        )
 
     def invalidate_user_channels(
         self, username: str, now_seconds: int | None = None
@@ -332,16 +225,13 @@ class KeyExchangeService:
             now_seconds: Tiempo actual en segundos.
         """
         current_seconds = self._resolve_now_seconds(now_seconds)
-        self._channel_repository.invalidate_user_channels(username, current_seconds)
-        for pair in list(self._session_keys.keys()):
-            channel = self._channel_repository.get_channel(pair)
-            if not channel:
-                continue
-            if username not in {channel["peer_a"], channel["peer_b"]}:
-                continue
-            self._session_keys.pop(pair, None)
-            self._seen_nonces.pop(pair, None)
-            self._pending_private_keys.pop(pair, None)
+        for pair, channel in self._channels.items():
+            if username in {channel["peer_a"], channel["peer_b"]}:
+                channel["state"] = "INVALID"
+                channel["invalidated_at"] = current_seconds
+                self._session_keys.pop(pair, None)
+                self._seen_nonces.pop(pair, None)
+                self._pending_private_keys.pop(pair, None)
 
     def channel_state(self, user_a: str, user_b: str) -> str:
         """Obtiene estado actual del canal para un par.
@@ -353,7 +243,7 @@ class KeyExchangeService:
         Returns:
             Estado del canal: ``NONE``, ``ESTABLISHING``, ``ACTIVE`` o ``INVALID``.
         """
-        channel = self._channel_repository.get_channel(self._pair_key(user_a, user_b))
+        channel = self._channels.get(self._pair_key(user_a, user_b))
         if not channel:
             return "NONE"
         return str(channel["state"])
