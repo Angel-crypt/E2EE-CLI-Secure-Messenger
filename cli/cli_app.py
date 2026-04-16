@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from collections import deque
 import os
+import threading
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Any, Callable, Iterable
+from uuid import uuid4
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.panel import Panel
@@ -28,6 +32,7 @@ from cli.formatters import (
 )
 from cli.themes import get_theme, list_theme_names
 from cli.status_diagnostics import build_status_diagnostics
+from infrastructure.runtime_transport_gateway import RuntimeTransportGateway
 
 
 PROMPT_TOOLKIT_COLOR_MAP: dict[str, str] = {
@@ -85,7 +90,12 @@ def _should_use_legacy_windows_console(
 class CliApp:
     """Aplicación CLI síncrona con comando y chat persistente."""
 
-    def __init__(self, controller: AppController) -> None:
+    def __init__(
+        self,
+        controller: AppController,
+        relay_url: str | None = None,
+        transport_gateway_factory: Callable[[str], Any] | None = None,
+    ) -> None:
         self._controller = controller
         self._console = Console(
             legacy_windows=_should_use_legacy_windows_console(),
@@ -100,8 +110,17 @@ class CliApp:
         self._theme = get_theme(self._theme_name)
         self._prompt_style = self._build_prompt_toolkit_style()
         self._last_notification_fingerprint: str | None = None
+        self._seen_transport_message_ids: deque[str] = deque(maxlen=256)
         self._exit_confirmation_pending = False
         self._last_status_snapshot: tuple[str, str, str, str, str] | None = None
+        self._relay_url = relay_url
+        self._transport_gateway = None
+        self._background_poll_interval_seconds = 0.25
+        self._background_poll_stop = threading.Event()
+        self._background_poll_thread: threading.Thread | None = None
+        if relay_url is not None:
+            factory = transport_gateway_factory or RuntimeTransportGateway
+            self._transport_gateway = factory(relay_url)
 
     def run(self) -> None:
         """Ejecuta loop principal interactivo."""
@@ -117,28 +136,33 @@ class CliApp:
             )
 
         self._render_welcome()
-        while self._running:
-            self._poll_notifications()
-            self._render_status_bar_if_changed()
-            prompt = self._build_prompt()
-            try:
-                assert self._session is not None
-                line = self._session.prompt(
-                    prompt,
-                    style=self._prompt_style,
-                ).strip()
-            except (EOFError, KeyboardInterrupt):
-                self._running = False
-                continue
+        self._start_background_polling()
+        try:
+            with patch_stdout(raw=True):
+                while self._running:
+                    self._poll_notifications()
+                    self._render_status_bar_if_changed()
+                    prompt = self._build_prompt()
+                    try:
+                        assert self._session is not None
+                        line = self._session.prompt(
+                            prompt,
+                            style=self._prompt_style,
+                        ).strip()
+                    except (EOFError, KeyboardInterrupt):
+                        self._running = False
+                        continue
 
-            if not line:
-                continue
+                    if not line:
+                        continue
 
-            if line.startswith("/"):
-                self._handle_command(line)
-            else:
-                self._exit_confirmation_pending = False
-                self._handle_free_text(line)
+                    if line.startswith("/"):
+                        self._handle_command(line)
+                    else:
+                        self._exit_confirmation_pending = False
+                        self._handle_free_text(line)
+        finally:
+            self._stop_background_polling()
 
     def _build_prompt(self) -> FormattedText:
         if self._current_user is None:
@@ -265,6 +289,9 @@ class CliApp:
                     )
                 )
                 return
+            if self._transport_gateway is not None:
+                self._transport_gateway.close()
+            self._stop_background_polling()
             self._running = False
             self._print_line(
                 format_info(self._theme, f"{self._theme.icon_exit} Saliendo...")
@@ -308,6 +335,20 @@ class CliApp:
         response = self._controller.register(self._build_register_message(username))
         if response["ok"]:
             self._current_user = username
+            try:
+                if self._transport_gateway is not None:
+                    self._transport_gateway.connect(username)
+                    self._transport_gateway.send_frame(
+                        self._build_register_message(username)
+                    )
+            except RuntimeError:
+                self._print_line(
+                    format_warning(
+                        self._theme,
+                        "No se pudo conectar al relay configurado. Se mantiene modo local.",
+                    )
+                )
+                self._transport_gateway = None
             self._print_line(format_event(self._theme, "REGISTERED", response["data"]))
         else:
             self._print_line(format_error(self._theme, response["error"]))
@@ -341,6 +382,8 @@ class CliApp:
             )
         else:
             self._print_line(format_error(self._theme, response["error"]))
+        if self._transport_gateway is not None:
+            self._transport_gateway.close()
 
     def _handle_chat(self, parts: list[str]) -> None:
         if self._current_user is None:
@@ -364,6 +407,8 @@ class CliApp:
             )
             return
 
+        self._ensure_known_transport_user(target)
+
         status = self._user_status(target)
         if status == "missing":
             self._print_line(
@@ -385,6 +430,21 @@ class CliApp:
         self._chat_target = target
         self._print_line(format_info(self._theme, f"Chat activo con {target}"))
 
+        channel_state = self._channel_state(self._current_user, target)
+        if channel_state == "ACTIVE":
+            self._print_line(
+                format_info(self._theme, f"Canal seguro ya activo con {target}.")
+            )
+            return
+        if channel_state == "ESTABLISHING":
+            self._print_line(
+                format_info(
+                    self._theme,
+                    f"Canal seguro en establecimiento con {target}. Esperando confirmación...",
+                )
+            )
+            return
+
         hs_response = self._controller.handshake_init(
             self._build_handshake_message(self._current_user, target),
             now_seconds=self._now_seconds(),
@@ -393,6 +453,7 @@ class CliApp:
             self._print_line(
                 format_event(self._theme, "HANDSHAKE_STARTED", hs_response["data"])
             )
+            self._start_remote_handshake(target)
         else:
             self._print_line(format_error(self._theme, hs_response["error"]))
 
@@ -419,6 +480,8 @@ class CliApp:
                 )
             )
             return
+
+        self._ensure_known_transport_user(target)
 
         status = self._user_status(target)
         if status == "missing":
@@ -473,15 +536,16 @@ class CliApp:
 
     def _print_send_response(self, response: dict) -> None:
         if response["ok"]:
-            self._print_line(
-                format_event(self._theme, "MESSAGE_ACCEPTED", response["data"])
-            )
+            self._send_message_frame(response["data"])
             return
 
         self._print_line(format_error(self._theme, response["error"]))
         data = response.get("data")
         if isinstance(data, dict) and data.get("event") == "HANDSHAKE_STARTED":
             self._print_line(format_event(self._theme, "HANDSHAKE_STARTED", data))
+            target = data.get("to")
+            if isinstance(target, str):
+                self._start_remote_handshake(target)
 
     def _handle_poll(self, parts: list[str]) -> None:
         if len(parts) != 2 or parts[1] not in {"on", "off"}:
@@ -575,6 +639,7 @@ class CliApp:
         self._console.print(table)
 
     def _print_notifications(self) -> None:
+        self._drain_transport_frames()
         if self._current_user is None:
             return
         response = self._controller.pull_notifications(self._current_user)
@@ -593,6 +658,138 @@ class CliApp:
         if not self._poll_enabled or self._current_user is None:
             return
         self._print_notifications()
+
+    def _start_background_polling(self, interval_seconds: float | None = None) -> None:
+        if self._background_poll_thread is not None:
+            return
+        if interval_seconds is not None:
+            self._background_poll_interval_seconds = interval_seconds
+
+        self._background_poll_stop.clear()
+        self._background_poll_thread = threading.Thread(
+            target=self._background_poll_loop,
+            name="cli-background-poll",
+            daemon=True,
+        )
+        self._background_poll_thread.start()
+
+    def _stop_background_polling(self) -> None:
+        thread = self._background_poll_thread
+        if thread is None:
+            return
+
+        self._background_poll_stop.set()
+        thread.join(timeout=1.0)
+        self._background_poll_thread = None
+
+    def _background_poll_loop(self) -> None:
+        while not self._background_poll_stop.wait(
+            self._background_poll_interval_seconds
+        ):
+            try:
+                self._poll_notifications()
+            except Exception:  # pragma: no cover - defensivo para no matar thread
+                continue
+
+    def _send_message_frame(self, payload: dict[str, Any]) -> None:
+        if self._transport_gateway is None or self._current_user is None:
+            return
+        target = payload.get("to")
+        if not isinstance(target, str):
+            return
+        frame = {
+            "message_id": str(uuid4()),
+            "timestamp": datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z"),
+            "type": "MESSAGE",
+            "from": self._current_user,
+            "to": target,
+            "payload": payload.get("payload", {}),
+        }
+        self._transport_gateway.send_frame(frame)
+
+    def _start_remote_handshake(self, target: str) -> None:
+        if self._transport_gateway is None or self._current_user is None:
+            return
+        offer = self._controller.create_handshake_offer(
+            self._current_user,
+            target,
+            now_seconds=self._now_seconds(),
+        )
+        if offer.get("ok"):
+            self._transport_gateway.send_frame(offer["data"]["frame"])
+
+    def _drain_transport_frames(self) -> None:
+        if self._transport_gateway is None:
+            return
+
+        for frame in self._transport_gateway.poll_incoming():
+            frame_type = frame.get("type")
+            if frame_type == "REGISTER":
+                remote = frame.get("from")
+                if isinstance(remote, str) and remote != self._current_user:
+                    self._ensure_known_transport_user(remote)
+                continue
+
+            if frame_type == "HANDSHAKE_INIT":
+                remote = frame.get("from")
+                if (
+                    isinstance(remote, str)
+                    and remote != self._current_user
+                    and self._chat_target is None
+                ):
+                    self._chat_target = remote
+                result = self._controller.process_handshake_frame(
+                    frame,
+                    now_seconds=self._now_seconds(),
+                )
+                if result.get("ok"):
+                    reply = result.get("data", {}).get("frame")
+                    if isinstance(reply, dict):
+                        self._transport_gateway.send_frame(reply)
+                else:
+                    self._print_line(format_error(self._theme, result["error"]))
+                continue
+
+            if frame_type == "MESSAGE":
+                message_id = frame.get("message_id")
+                if isinstance(message_id, str) and self._is_duplicate_transport_message(
+                    message_id
+                ):
+                    continue
+                sender = frame.get("from")
+                if isinstance(sender, str):
+                    self._ensure_known_transport_user(sender)
+                    if sender != self._current_user and self._chat_target is None:
+                        self._chat_target = sender
+                result = self._controller.receive_message(
+                    frame,
+                    now_seconds=self._now_seconds(),
+                )
+                if result.get("ok"):
+                    sender = result["data"].get("from", "?")
+                    plaintext = result["data"].get("plaintext", "")
+                    self._print_line(
+                        f"[{self._theme.info_style}]{sender}:[/{self._theme.info_style}] {plaintext}"
+                    )
+                else:
+                    self._print_line(format_error(self._theme, result["error"]))
+
+    def _is_duplicate_transport_message(self, message_id: str) -> bool:
+        if message_id in self._seen_transport_message_ids:
+            return True
+
+        self._seen_transport_message_ids.append(message_id)
+        return False
+
+    def _ensure_known_transport_user(self, username: str) -> None:
+        if self._transport_gateway is None:
+            return
+        if self._user_status(username) != "missing":
+            return
+        self._controller.register(self._build_register_message(username))
 
     def _user_status(self, username: str) -> str:
         response = self._controller.list_users()
@@ -708,7 +905,7 @@ class CliApp:
         }
 
     def _now_seconds(self) -> int:
-        return int(datetime.utcnow().timestamp())
+        return int(datetime.now(timezone.utc).timestamp())
 
     def _channel_state(self, sender: str, target: str) -> str:
         response = self._controller.get_channel_state(sender, target)
