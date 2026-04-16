@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -10,6 +11,8 @@ from websockets.asyncio.server import Server
 from websockets.asyncio.server import ServerConnection
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
+
+logger = logging.getLogger(__name__)
 
 
 class MinimalRelayServer:
@@ -47,6 +50,11 @@ class MinimalRelayServer:
         current_username = self._username_from_connection(ws)
         if current_username is not None:
             self._users[current_username] = ws
+            logger.info(
+                "Conectado: %s  (usuarios activos: %d)",
+                current_username,
+                len(self._users),
+            )
         try:
             async for raw in ws:
                 if not isinstance(raw, str):
@@ -61,6 +69,11 @@ class MinimalRelayServer:
                 if frame_type == "REGISTER" and isinstance(sender, str):
                     self._users[sender] = ws
                     current_username = sender
+                    logger.info(
+                        "REGISTER  usuario=%s  (usuarios activos: %d)",
+                        sender,
+                        len(self._users),
+                    )
                     continue
 
                 target = frame.get("to")
@@ -70,16 +83,31 @@ class MinimalRelayServer:
                 self.relayed_frames.append(frame)
                 destination = self._users.get(target)
                 if destination is None:
+                    logger.warning(
+                        "%-20s %s → %s  (destino no encontrado)",
+                        frame_type,
+                        sender,
+                        target,
+                    )
                     continue
                 try:
                     await destination.send(json.dumps(frame))
+                    logger.info("%-20s %s → %s", frame_type, sender, target)
                 except ConnectionClosed:
                     self._users.pop(target, None)
+                    logger.warning(
+                        "%-20s %s → %s  (conexión cerrada)", frame_type, sender, target
+                    )
         finally:
             if current_username is not None:
                 stored = self._users.get(current_username)
                 if stored is ws:
                     self._users.pop(current_username, None)
+                    logger.info(
+                        "Desconectado: %s  (usuarios activos: %d)",
+                        current_username,
+                        len(self._users),
+                    )
 
     def _username_from_connection(self, ws: ServerConnection) -> str | None:
         request = ws.request
