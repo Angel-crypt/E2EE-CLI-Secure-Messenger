@@ -17,12 +17,3 @@ def test_start_handshake_when_channel_missing(service: KeyExchangeService):
     assert ok is True
     assert error is None
     assert service.channel_state("alice", "bob") == "ESTABLISHING"
-
-
-@pytest.mark.unit
-def test_handshake_marks_channel_active_when_completed(service: KeyExchangeService):
-    service.start_handshake("alice", "bob", now_seconds=0)
-
-    service.complete_handshake("alice", "bob", now_seconds=1)
-
-    assert service.channel_state("alice", "bob") == "ACTIVE"

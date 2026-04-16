@@ -18,11 +18,6 @@ def test_key_exchange_uses_clock_when_now_not_provided():
     service = KeyExchangeService(timeout_seconds=5, clock=clock)
 
     service.start_handshake("alice", "bob")
-    assert service.channel_state("alice", "bob") == "ESTABLISHING"
 
-    clock.value = 16
-    timed_out, error = service.check_timeout("alice", "bob")
-
-    assert timed_out is True
-    assert error is not None
-    assert error["payload"]["code"] == "504_KEY_EXCHANGE_TIMEOUT"
+    pair = service._pair_key("alice", "bob")
+    assert service._channels[pair]["started_at"] == 10

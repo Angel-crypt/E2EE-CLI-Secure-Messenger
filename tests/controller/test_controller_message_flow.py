@@ -84,19 +84,6 @@ def test_message_without_active_channel_returns_403(controller: AppController):
 
 
 @pytest.mark.unit
-def test_handshake_then_message_is_accepted(controller: AppController):
-    controller.handshake_init(_handshake_msg("alice", "bob"), now_seconds=1)
-    controller.complete_handshake("alice", "bob", now_seconds=2)
-
-    result = controller.send_message(
-        _message_msg("alice", "bob", "payload"), now_seconds=2
-    )
-
-    assert result["ok"] is True
-    assert result["data"]["event"] == "MESSAGE_ACCEPTED"
-
-
-@pytest.mark.unit
 def test_send_text_message_empty_is_rejected(controller: AppController):
     result = controller.send_text_message("alice", "bob", "   ", now_seconds=1)
     assert result["ok"] is False

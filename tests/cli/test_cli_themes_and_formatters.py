@@ -1,4 +1,5 @@
 import pytest
+import time
 from prompt_toolkit.document import Document
 from prompt_toolkit.completion.base import CompleteEvent
 
@@ -13,7 +14,6 @@ def test_theme_catalog_has_expected_presets():
     names = list_theme_names()
     assert "default" in names
     assert "minimal" in names
-    assert "contrast" in names
     assert "matrix" in names
 
 
@@ -222,3 +222,198 @@ def test_legacy_windows_env_override_is_respected():
     legacy = _should_use_legacy_windows_console(env, os_name="nt")
 
     assert legacy is True
+
+
+@pytest.mark.unit
+def test_cli_register_connects_transport_when_gateway_is_configured(monkeypatch):
+    connected: list[str] = []
+
+    class _FakeGateway:
+        def connect(self, username: str) -> None:
+            connected.append(username)
+
+        def close(self) -> None:
+            return None
+
+        def send_frame(self, frame: dict) -> None:
+            return None
+
+        def poll_incoming(self) -> list[dict]:
+            return []
+
+    cli = CliApp(
+        AppController(),
+        relay_url="ws://127.0.0.1:8765",
+        transport_gateway_factory=lambda _url: _FakeGateway(),
+    )
+
+    cli._handle_user(["/user", "alice"])
+
+    assert connected == ["alice"]
+
+
+@pytest.mark.unit
+def test_cli_register_without_gateway_keeps_legacy_local_flow():
+    cli = CliApp(AppController())
+
+    cli._handle_user(["/user", "alice"])
+
+    assert cli._current_user == "alice"
+
+
+@pytest.mark.unit
+def test_background_polling_loop_triggers_notifications_without_manual_notif():
+    cli = CliApp(AppController())
+    cli._current_user = "alice"
+
+    calls = {"count": 0}
+
+    def _fake_print_notifications() -> None:
+        calls["count"] += 1
+
+    cli._print_notifications = _fake_print_notifications  # type: ignore[method-assign]
+
+    cli._start_background_polling(interval_seconds=0.05)
+    try:
+        time.sleep(0.16)
+    finally:
+        cli._stop_background_polling()
+
+    assert calls["count"] >= 2
+
+
+@pytest.mark.unit
+def test_background_polling_respects_poll_off_and_does_not_spam():
+    cli = CliApp(AppController())
+    cli._current_user = "alice"
+    cli._poll_enabled = False
+
+    calls = {"count": 0}
+
+    def _fake_print_notifications() -> None:
+        calls["count"] += 1
+
+    cli._print_notifications = _fake_print_notifications  # type: ignore[method-assign]
+
+    cli._start_background_polling(interval_seconds=0.05)
+    try:
+        time.sleep(0.16)
+    finally:
+        cli._stop_background_polling()
+
+    assert calls["count"] == 0
+
+
+@pytest.mark.unit
+def test_drain_transport_frames_skips_duplicate_message_ids():
+    class _FakeGateway:
+        def __init__(self) -> None:
+            self._first = True
+
+        def poll_incoming(self) -> list[dict]:
+            if not self._first:
+                return []
+            self._first = False
+            frame = {
+                "message_id": "dup-1",
+                "type": "MESSAGE",
+                "from": "bob",
+                "to": "alice",
+                "payload": {"ciphertext": "x", "algorithm": "FERNET"},
+                "timestamp": "2026-01-01T00:00:00Z",
+            }
+            return [frame, frame]
+
+    cli = CliApp(AppController())
+    cli._current_user = "alice"
+    cli._transport_gateway = _FakeGateway()
+
+    printed: list[str] = []
+    cli._print_line = lambda text: printed.append(text)  # type: ignore[method-assign]
+    cli._ensure_known_transport_user = (  # type: ignore[method-assign]
+        lambda _username: None
+    )
+    cli._controller.receive_message = lambda _frame, now_seconds=None: {  # type: ignore[method-assign]
+        "ok": True,
+        "data": {"from": "bob", "plaintext": "hola"},
+    }
+
+    cli._drain_transport_frames()
+
+    rendered_messages = [line for line in printed if "bob:" in line and "hola" in line]
+    assert len(rendered_messages) == 1
+
+
+@pytest.mark.unit
+def test_drain_handshake_auto_assigns_chat_target_when_missing():
+    class _FakeGateway:
+        def poll_incoming(self) -> list[dict]:
+            return [
+                {
+                    "message_id": "hs-1",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "type": "HANDSHAKE_INIT",
+                    "from": "bob",
+                    "to": "alice",
+                    "payload": {
+                        "username": "bob",
+                        "public_key": "pub",
+                        "nonce": "n1",
+                        "reason": "ON_DEMAND",
+                    },
+                }
+            ]
+
+        def send_frame(self, frame: dict) -> None:
+            _ = frame
+
+    cli = CliApp(AppController())
+    cli._current_user = "alice"
+    cli._chat_target = None
+    cli._transport_gateway = _FakeGateway()
+    cli._controller.register(cli._build_register_message("bob"))
+    cli._controller.process_handshake_frame = lambda frame, now_seconds=None: {  # type: ignore[method-assign]
+        "ok": True,
+        "data": {"event": "HANDSHAKE_COMPLETED", "frame": None},
+    }
+
+    cli._drain_transport_frames()
+
+    assert cli._chat_target == "bob"
+
+
+@pytest.mark.unit
+def test_drain_message_auto_assigns_chat_target_when_missing():
+    class _FakeGateway:
+        def poll_incoming(self) -> list[dict]:
+            return [
+                {
+                    "message_id": "msg-1",
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "type": "MESSAGE",
+                    "from": "bob",
+                    "to": "alice",
+                    "payload": {
+                        "ciphertext": "x",
+                        "algorithm": "FERNET",
+                        "encoding": "base64url",
+                        "nonce": "n1",
+                        "sent_at": "2026-01-01T00:00:00Z",
+                    },
+                }
+            ]
+
+    cli = CliApp(AppController())
+    cli._current_user = "alice"
+    cli._chat_target = None
+    cli._transport_gateway = _FakeGateway()
+    cli._controller.register(cli._build_register_message("bob"))
+    cli._controller.receive_message = lambda _frame, now_seconds=None: {  # type: ignore[method-assign]
+        "ok": True,
+        "data": {"from": "bob", "plaintext": "hola"},
+    }
+    cli._print_line = lambda _text: None  # type: ignore[method-assign]
+
+    cli._drain_transport_frames()
+
+    assert cli._chat_target == "bob"

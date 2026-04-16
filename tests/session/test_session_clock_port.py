@@ -26,13 +26,15 @@ class SpyKeyExchange(KeyExchangeService):
 
 
 @pytest.mark.unit
-def test_session_service_uses_clock_port_on_register_and_disconnect():
+def test_session_service_uses_clock_port_on_disconnect():
     clock = FixedClock(123)
     key_exchange = SpyKeyExchange()
     service = SessionUserService(key_exchange_service=key_exchange, clock=clock)
 
     service.register("alice")
-    assert key_exchange.last_invalidated == ("alice", 123)
+    assert (
+        key_exchange.last_invalidated is None
+    )  # register no longer invalidates channels
 
     service.disconnect("alice")
     assert key_exchange.last_invalidated == ("alice", 123)

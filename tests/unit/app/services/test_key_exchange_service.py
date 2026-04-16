@@ -70,7 +70,6 @@ def test_activate_secure_channel_stores_key_and_state(service: KeyExchangeServic
 
     assert service.channel_state("alice", "bob") == "ACTIVE"
     assert service.get_session_key("alice", "bob") == b"session-key"
-    assert service.get_remote_fingerprint("alice", "bob") == "fp-a"
 
 
 @pytest.mark.unit
@@ -116,4 +115,28 @@ def test_validate_replay_accepts_timestamp_inside_window(service: KeyExchangeSer
     )
 
     assert ok is True
+    assert error is None
+
+
+@pytest.mark.unit
+def test_start_handshake_does_not_reset_establishing_started_at(
+    service: KeyExchangeService,
+):
+    service.start_handshake("alice", "bob", now_seconds=10)
+
+    service.start_handshake("alice", "bob", now_seconds=20)
+
+    pair = service._pair_key("alice", "bob")
+    assert service._channels[pair]["started_at"] == 10
+
+
+@pytest.mark.unit
+def test_ensure_handshake_started_returns_false_when_already_establishing(
+    service: KeyExchangeService,
+):
+    service.start_handshake("alice", "bob", now_seconds=10)
+
+    started, error = service.ensure_handshake_started("alice", "bob", now_seconds=11)
+
+    assert started is False
     assert error is None

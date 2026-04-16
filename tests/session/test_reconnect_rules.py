@@ -37,17 +37,16 @@ def test_reconnect_requires_previous_session_closed(service: SessionUserService)
 def test_reconnect_invalidates_previous_channels(service: SessionUserService):
     service.register("alice")
     service.register("bob")
-    service.mark_secure_channel("alice", "bob")
+    service._key_exchange.activate_secure_channel(
+        "alice", "bob", key=b"k", fp="fp-1", now=0
+    )
 
-    can_send_before, _ = service.can_send_message("alice", "bob")
-    assert can_send_before is True
+    assert service._key_exchange.channel_state("alice", "bob") == "ACTIVE"
 
     service.disconnect("alice")
     service.register("alice")
 
-    can_send_after, err_after = service.can_send_message("alice", "bob")
-    assert can_send_after is False
-    _assert_structured_error(err_after, "403_SECURE_CHANNEL_REQUIRED", "alice")
+    assert service._key_exchange.channel_state("alice", "bob") == "INVALID"
 
 
 @pytest.mark.unit
@@ -56,11 +55,11 @@ def test_message_after_reconnect_requires_new_handshake_init(
 ):
     service.register("alice")
     service.register("bob")
-    service.mark_secure_channel("alice", "bob")
+    service._key_exchange.activate_secure_channel(
+        "alice", "bob", key=b"k", fp="fp-1", now=0
+    )
 
     service.disconnect("alice")
     service.register("alice")
 
-    can_send, err = service.can_send_message("alice", "bob")
-    assert can_send is False
-    _assert_structured_error(err, "403_SECURE_CHANNEL_REQUIRED", "alice")
+    assert service._key_exchange.channel_state("alice", "bob") == "INVALID"

@@ -1,3 +1,5 @@
+"""Tests for ChatService behaviors now absorbed into AppController."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -5,9 +7,8 @@ from datetime import datetime, timezone
 import pytest
 from cryptography.fernet import Fernet
 
-from app.services.chat_service import ChatService
+from app.app_controller import AppController
 from app.services.key_exchange_service import KeyExchangeService
-from app.services.user_service import SessionUserService
 from infrastructure.crypto import CryptoProvider
 
 
@@ -38,63 +39,75 @@ def _message(sender: str, target: str, ciphertext: str) -> dict:
     }
 
 
-@pytest.fixture
-def services() -> tuple[ChatService, KeyExchangeService, CryptoProvider]:
-    key_exchange = KeyExchangeService(timeout_seconds=5)
-    user_service = SessionUserService(key_exchange_service=key_exchange)
-    user_service.register("alice")
-    user_service.register("bob")
-    crypto = CryptoProvider()
-    chat = ChatService(
-        user_service=user_service,
-        key_exchange_service=key_exchange,
-        crypto_provider=crypto,
+def _register_msg(username: str) -> dict:
+    now_iso = (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
     )
-    return chat, key_exchange, crypto
+    return {
+        "message_id": "f8215ae4-a9d5-4434-ae54-3cc676db7ce0",
+        "timestamp": now_iso,
+        "type": "REGISTER",
+        "from": username,
+        "payload": {
+            "username": username,
+            "public_key": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE...",
+        },
+    }
+
+
+@pytest.fixture
+def controller() -> tuple[AppController, KeyExchangeService, CryptoProvider]:
+    key_exchange = KeyExchangeService(timeout_seconds=5)
+    crypto = CryptoProvider()
+    ctrl = AppController(key_exchange_service=key_exchange, crypto_provider=crypto)
+    ctrl.register(_register_msg("alice"))
+    ctrl.register(_register_msg("bob"))
+    return ctrl, key_exchange, crypto
 
 
 @pytest.mark.unit
 def test_send_requires_secure_channel_and_starts_handshake(
-    services: tuple[ChatService, KeyExchangeService, CryptoProvider],
+    controller: tuple[AppController, KeyExchangeService, CryptoProvider],
 ):
-    chat, _, _ = services
+    ctrl, _, _ = controller
     message = _message("alice", "bob", "plaintext")
+    now = int(datetime.now(timezone.utc).timestamp())
 
-    ok, error, handshake_started = chat.validate_outgoing_message_with_handshake(
-        message, now_seconds=int(datetime.now(timezone.utc).timestamp())
-    )
+    response = ctrl.send_message(message, now_seconds=now)
 
-    assert ok is False
-    assert error is not None
+    assert response["ok"] is False
+    error = response["error"]
     assert error["payload"]["code"] == "403_SECURE_CHANNEL_REQUIRED"
-    assert handshake_started is True
+    assert error["payload"]["details"]["handshake_started"] is True
 
 
 @pytest.mark.unit
 def test_build_message_encrypts_payload_with_active_channel(
-    services: tuple[ChatService, KeyExchangeService, CryptoProvider],
+    controller: tuple[AppController, KeyExchangeService, CryptoProvider],
 ):
-    chat, key_exchange, crypto = services
+    ctrl, key_exchange, crypto = controller
     session_key = Fernet.generate_key()
     now = int(datetime.now(timezone.utc).timestamp())
     key_exchange.activate_secure_channel(
         "alice", "bob", key=session_key, fp="fp", now=now
     )
 
-    ok, message, error = chat.build_message_from_text("alice", "bob", "hola bob")
+    response = ctrl.send_text_message("alice", "bob", "hola bob", now_seconds=now)
 
-    assert ok is True
-    assert error is None
-    assert message is not None
-    assert message["payload"]["ciphertext"] != "hola bob"
-    assert crypto.decrypt(session_key, message["payload"]["ciphertext"]) == "hola bob"
+    assert response["ok"] is True
+    payload = response["data"]["payload"]
+    assert payload["ciphertext"] != "hola bob"
+    assert crypto.decrypt(session_key, payload["ciphertext"]) == "hola bob"
 
 
 @pytest.mark.unit
 def test_decrypt_incoming_message_applies_replay_guard(
-    services: tuple[ChatService, KeyExchangeService, CryptoProvider],
+    controller: tuple[AppController, KeyExchangeService, CryptoProvider],
 ):
-    chat, key_exchange, crypto = services
+    ctrl, key_exchange, crypto = controller
     session_key = Fernet.generate_key()
     now = int(datetime.now(timezone.utc).timestamp())
     key_exchange.activate_secure_channel(
@@ -103,18 +116,11 @@ def test_decrypt_incoming_message_applies_replay_guard(
     cipher = crypto.encrypt(session_key, "secreto")
     message = _message("alice", "bob", cipher)
 
-    first_ok, plaintext, first_error = chat.decrypt_incoming_message(
-        message, now_seconds=now
-    )
-    second_ok, second_plaintext, second_error = chat.decrypt_incoming_message(
-        message, now_seconds=now
-    )
+    first_response = ctrl.receive_message(message, now_seconds=now)
+    second_response = ctrl.receive_message(message, now_seconds=now)
 
-    assert first_ok is True
-    assert plaintext == "secreto"
-    assert first_error is None
+    assert first_response["ok"] is True
+    assert first_response["data"]["plaintext"] == "secreto"
 
-    assert second_ok is False
-    assert second_plaintext is None
-    assert second_error is not None
-    assert second_error["payload"]["code"] == "409_REPLAY_DETECTED"
+    assert second_response["ok"] is False
+    assert second_response["error"]["payload"]["code"] == "409_REPLAY_DETECTED"
